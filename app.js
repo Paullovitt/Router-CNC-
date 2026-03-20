@@ -994,7 +994,7 @@ function rebuildSheetsVisuals() {
 
     const thicknessEdges = createSheetVolumeEdges(
       bodyGeo,
-      0x475569
+      isActive ? 0x38bdf8 : 0x475569
     );
     thicknessEdges.position.set(centerX, centerY, plateZ);
     wrapper.add(thicknessEdges);

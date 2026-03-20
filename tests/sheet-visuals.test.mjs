@@ -22,6 +22,7 @@ test("visual da chapa possui helper para arestas 3D da espessura", () => {
 test("rebuildSheetsVisuals adiciona arestas da espessura e borda interna util", () => {
   const appJs = readAppJs();
   assert.match(appJs, /const thicknessEdges = createSheetVolumeEdges\(/);
+  assert.match(appJs, /isActive \? 0x38bdf8 : 0x475569/);
   assert.match(appJs, /thicknessEdges\.position\.set\(centerX, centerY, plateZ\);/);
   assert.match(appJs, /wrapper\.add\(thicknessEdges\);/);
   assert.match(appJs, /const usable = getSheetUsableBounds\(sheet, sheet\.originX, sheet\.originY\);/);
