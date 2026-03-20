@@ -111,3 +111,7 @@ Cobertura atual dos testes:
 
 - `POST /api/parse-dxf`
 - `POST /api/parse-step`
+
+## Licenca
+
+Este projeto esta sob a licenca MIT. Veja o arquivo `LICENSE` para os detalhes completos.
