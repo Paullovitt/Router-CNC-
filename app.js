@@ -794,6 +794,7 @@ function getCachedPartBounds(part) {
 
 const sheetState = [];
 let activeSheetIndex = 0;
+let sheetCreationTemplate = normalizeSheetConfig(DEFAULT_SHEET_CONFIG, DEFAULT_SHEET_CONFIG);
 
 function getValidSheetIndex(index) {
   const numeric = Number(index);
@@ -807,8 +808,16 @@ function cloneSheetConfig(config) {
   return { ...normalizeSheetConfig(config, DEFAULT_SHEET_CONFIG), originX: 0, originY: 0 };
 }
 
+function getSheetCreationTemplate() {
+  return normalizeSheetConfig(sheetCreationTemplate, DEFAULT_SHEET_CONFIG);
+}
+
+function setSheetCreationTemplate(config) {
+  sheetCreationTemplate = normalizeSheetConfig(config, DEFAULT_SHEET_CONFIG);
+}
+
 function createSheetFrom(config = null) {
-  const source = config || DEFAULT_SHEET_CONFIG;
+  const source = config || getSheetCreationTemplate();
   return cloneSheetConfig(source);
 }
 
@@ -1051,8 +1060,7 @@ function assignPartToSheet(
   }
 
   if (allowCreateSheet) {
-    const source = sheetState[Math.max(0, target)] || sheetState[sheetState.length - 1] || DEFAULT_SHEET_CONFIG;
-    sheetState.push(createSheetFrom(source));
+    sheetState.push(createSheetFrom());
     syncSheetsOrigins({ preservePartPositions: true });
     activeSheetIndex = sheetState.length - 1;
     rebuildSheetsVisuals();
@@ -1070,7 +1078,7 @@ function assignPartToSheet(
 
 function ensureInitialSheet() {
   if (sheetState.length > 0) return;
-  sheetState.push(createSheetFrom(DEFAULT_SHEET_CONFIG));
+  sheetState.push(createSheetFrom());
   syncSheetsOrigins({ preservePartPositions: false });
   rebuildSheetsVisuals();
 }
@@ -3771,6 +3779,7 @@ const editSheetBtn = document.getElementById("editSheetBtn");
 const moveToSheetBtn = document.getElementById("moveToSheetBtn");
 const sheetEditModalEl = document.getElementById("sheetEditModal");
 const applySheetBtn = document.getElementById("applySheetBtn");
+const applyAllSheetsBtn = document.getElementById("applyAllSheetsBtn");
 const sheetWidthInput = document.getElementById("sheetW");
 const sheetHeightInput = document.getElementById("sheetH");
 const sheetThicknessInput = document.getElementById("sheetT");
@@ -3907,8 +3916,7 @@ function readSheetEditorForm() {
 
 if (newSheetBtn) {
   newSheetBtn.addEventListener("click", () => {
-    const source = sheetState[getValidSheetIndex(activeSheetIndex)] || DEFAULT_SHEET_CONFIG;
-    sheetState.push(createSheetFrom(source));
+    sheetState.push(createSheetFrom());
     syncSheetsOrigins({ preservePartPositions: true });
     setActiveSheet(sheetState.length - 1);
     updateGlobalBounds();
@@ -3952,6 +3960,32 @@ if (applySheetBtn) {
     syncSheetsOrigins({ preservePartPositions: true });
     rebuildSheetsVisuals();
     relayoutSheetPieces(sheetIndex);
+    closeSheetEditorModal();
+    updateGlobalBounds();
+    updateSheetListUi();
+    updateSheetInfoBadge();
+    fitToScene(1.15);
+  });
+}
+
+if (applyAllSheetsBtn) {
+  applyAllSheetsBtn.addEventListener("click", () => {
+    if (sheetState.length === 0) return;
+    const updated = readSheetEditorForm();
+    setSheetCreationTemplate(updated);
+
+    for (let idx = 0; idx < sheetState.length; idx += 1) {
+      sheetState[idx] = {
+        ...sheetState[idx],
+        ...updated
+      };
+    }
+
+    syncSheetsOrigins({ preservePartPositions: true });
+    rebuildSheetsVisuals();
+    for (let idx = 0; idx < sheetState.length; idx += 1) {
+      relayoutSheetPieces(idx);
+    }
     closeSheetEditorModal();
     updateGlobalBounds();
     updateSheetListUi();

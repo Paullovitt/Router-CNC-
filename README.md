@@ -81,7 +81,10 @@ Abra no navegador:
 3. Clique em uma chapa no painel lateral para ativar.
 4. Use `Mover para chapa` para enviar a peca selecionada para a chapa ativa.
 5. Use `Editar chapa` para ajustar largura, altura, margens e espacamento.
-6. Clique em `Enquadrar (Fit)` para centralizar a visualizacao.
+6. No modal:
+   - `Aplicar`: altera somente a chapa ativa.
+   - `Aplicar em todas`: altera todas as chapas atuais e vira padrao para novas chapas.
+7. Clique em `Enquadrar (Fit)` para centralizar a visualizacao.
 
 ## Principais modulos/funcoes
 
