@@ -30,5 +30,6 @@ test("setPartZForSheet aplica regra de DXF sem impactar STEP", () => {
   const appJs = readAppJs();
   assert.match(appJs, /applyDxfThicknessForSheet\(part, sheet\);/);
   assert.match(appJs, /if \(isDxfPart\(part\)\) \{/);
-  assert.match(appJs, /zOffset \+= dxfThickness \* 0\.5;/);
+  assert.match(appJs, /part\.position\.z = Number\(sheet\.originZ \|\| 0\) - sheetThickness \* 0\.5;/);
+  assert.match(appJs, /const baseZ = Number\(sheet\.originZ \|\| 0\) \+ SHEET_PART_ELEVATION;/);
 });

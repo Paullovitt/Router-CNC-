@@ -919,16 +919,13 @@ function setPartZForSheet(part, sheet) {
   if (!part || !sheet) return;
   applyDxfThicknessForSheet(part, sheet);
 
-  let zOffset = SHEET_PART_ELEVATION;
   if (isDxfPart(part)) {
-    const dxfThickness = Math.max(
-      0.1,
-      Number(part.userData?.appliedDxfThickness || sheet.thickness || DEFAULT_PART_THICKNESS)
-    );
-    zOffset += dxfThickness * 0.5;
+    const sheetThickness = Math.max(0.1, Number(sheet.thickness || DEFAULT_PART_THICKNESS));
+    part.position.z = Number(sheet.originZ || 0) - sheetThickness * 0.5;
+    return;
   }
 
-  const baseZ = Number(sheet.originZ || 0) + zOffset;
+  const baseZ = Number(sheet.originZ || 0) + SHEET_PART_ELEVATION;
   part.position.z = THREE.MathUtils.clamp(
     Number(part.position.z || baseZ),
     baseZ - SHEET_PART_Z_CLAMP,
