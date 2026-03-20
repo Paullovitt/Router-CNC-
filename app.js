@@ -1149,6 +1149,56 @@ function disposeObject3D(root) {
   });
 }
 
+function removePartFromScene(part) {
+  if (!part) return false;
+  if (selectedPart === part) clearSelection();
+  partsGroup.remove(part);
+  disposeObject3D(part);
+  return true;
+}
+
+function deleteSheetAt(index) {
+  const idx = getValidSheetIndex(index);
+  if (idx < 0) return false;
+
+  clearSelection();
+
+  const toRemove = [];
+  for (const part of partsGroup.children) {
+    const sheetIdx = Number(part.userData?.sheetIndex);
+    if (!Number.isFinite(sheetIdx)) continue;
+    const normalized = Math.trunc(sheetIdx);
+    if (normalized === idx) {
+      toRemove.push(part);
+      continue;
+    }
+    if (normalized > idx) {
+      part.userData.sheetIndex = normalized - 1;
+    }
+  }
+
+  for (const part of toRemove) {
+    partsGroup.remove(part);
+    disposeObject3D(part);
+  }
+
+  sheetState.splice(idx, 1);
+
+  if (sheetState.length > 0) {
+    activeSheetIndex = Math.min(idx, sheetState.length - 1);
+    syncSheetsOrigins({ preservePartPositions: true });
+  } else {
+    activeSheetIndex = 0;
+  }
+
+  rebuildSheetsVisuals();
+  updateGlobalBounds();
+  updatePieceCountBadge();
+  updateSheetListUi();
+  updateSheetInfoBadge();
+  return true;
+}
+
 function clearSelection() {
   transformControls.detach();
 
@@ -1301,16 +1351,21 @@ window.addEventListener("keydown", (event) => {
   }
 
   const isDelete = event.key === "Delete" || event.key === "Backspace";
-  if (!isDelete || !selectedPart) return;
+  if (!isDelete) return;
 
   const tag = document.activeElement?.tagName;
-  if (tag === "INPUT" || tag === "TEXTAREA") return;
+  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
 
   event.preventDefault();
+  const sheetFocused = !!sheetListEl && sheetListEl.contains(document.activeElement);
+  if (sheetFocused || !selectedPart) {
+    deleteSheetAt(activeSheetIndex);
+    return;
+  }
+
   const part = selectedPart;
-  clearSelection();
-  partsGroup.remove(part);
-  disposeObject3D(part);
+  if (!part) return;
+  removePartFromScene(part);
   updateGlobalBounds();
   updatePieceCountBadge();
   updateSheetListUi();
