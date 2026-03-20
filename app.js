@@ -90,6 +90,7 @@ const DEFAULT_AUTO_CENTER = true;
 const EPS = 1e-6;
 const CPU_CORES = Math.max(1, Number(navigator.hardwareConcurrency || 1));
 const DXF_PARSE_WORKERS = Math.max(1, CPU_CORES);
+const STEP_IMPORT_WORKERS = Math.max(1, Math.min(2, CPU_CORES));
 const DXF_CACHE_DB_NAME = "dxf-3d-viewer-cache";
 const DXF_PARSE_CACHE_STORE_NAME = "parsed-contours";
 const DXF_MESH_CACHE_STORE_NAME = "mesh-groups";
@@ -110,6 +111,19 @@ const DXF_CACHE_MAX_BYTES = DXF_PARSE_CACHE_MAX_BYTES;
 let dxfWorkerPool = null;
 let dxfCacheDbPromise = null;
 let dxfCacheInitLogged = false;
+const inventoryItems = [];
+let inventoryNextId = 1;
+let inventoryFilterQuery = "";
+let inventoryFilterType = "all";
+let inventoryBusy = false;
+const inventoryPreviewCache = new Map();
+const inventoryPreviewPending = new Set();
+let inventoryPreviewObserver = null;
+const INVENTORY_RENDER_INITIAL = 120;
+const INVENTORY_RENDER_CHUNK = 80;
+const INVENTORY_SCROLL_PREFETCH_PX = 280;
+let inventoryRenderList = [];
+let inventoryRenderLimit = 0;
 
 function createDxfWorkerPool(workerCount) {
   if (typeof Worker === "undefined") return null;
@@ -3702,7 +3716,17 @@ function shouldReparseInRawLineArcMode(parsed) {
   return openCount >= 2 && maxClosedArea < sourceArea * 0.02;
 }
 
-function finalizeImportedGroup(localGroup, autoCenter) {
+function finalizeImportedGroup(
+  localGroup,
+  autoCenter,
+  {
+    preferredSheetIndex = activeSheetIndex,
+    allowCreateSheet = true,
+    searchAllSheets = true,
+    strictPlacement = false
+  } = {}
+) {
+  if (!localGroup) return false;
   ensureInitialSheet();
   localGroup.updateMatrixWorld(true);
   tempBox.setFromObject(localGroup);
@@ -3710,16 +3734,27 @@ function finalizeImportedGroup(localGroup, autoCenter) {
     tempBox.getCenter(tempVec);
     localGroup.position.sub(tempVec);
   }
-  const activeSheet = sheetState[getValidSheetIndex(activeSheetIndex)];
-  setPartZForSheet(localGroup, activeSheet || { originZ: 0 });
-  localGroup.userData.sheetIndex = activeSheetIndex;
+
+  const preferredIndex = getValidSheetIndex(preferredSheetIndex);
+  const targetIndex = preferredIndex >= 0 ? preferredIndex : getValidSheetIndex(activeSheetIndex);
+  const targetSheet = sheetState[targetIndex];
+  setPartZForSheet(localGroup, targetSheet || { originZ: 0 });
+  localGroup.userData.sheetIndex = targetIndex >= 0 ? targetIndex : 0;
+
   partsGroup.add(localGroup);
   cachePartBounds(localGroup);
-  const placed = assignPartToSheet(localGroup, activeSheetIndex, {
-    allowCreateSheet: true,
-    searchAllSheets: true
+  const placed = assignPartToSheet(localGroup, targetIndex, {
+    allowCreateSheet,
+    searchAllSheets
   });
-  if (!placed) {
+
+  if (!placed && strictPlacement) {
+    partsGroup.remove(localGroup);
+    disposeObject3D(localGroup);
+    return false;
+  }
+
+  if (!placed && !strictPlacement) {
     clampPartToSheet(localGroup);
   }
 
@@ -3733,7 +3768,7 @@ function finalizeImportedGroup(localGroup, autoCenter) {
   updatePieceCountBadge();
   updateSheetListUi();
   updateSheetInfoBadge();
-  return true;
+  return placed || !strictPlacement;
 }
 
 function addDxfToScene(
@@ -3743,8 +3778,10 @@ function addDxfToScene(
   autoCenter = true,
   onIssue = null,
   preParsed = null,
-  onBuiltGroup = null
+  onBuiltGroup = null,
+  options = {}
 ) {
+  const finalizeInScene = options?.finalizeInScene !== false;
   const material = new THREE.MeshStandardMaterial({
     color: new THREE.Color().setHSL(Math.random(), 0.6, 0.55),
     metalness: 0.05,
@@ -3769,7 +3806,7 @@ function addDxfToScene(
     );
     if (okCnc) {
       if (typeof onBuiltGroup === "function") onBuiltGroup(localGroup);
-      return finalizeImportedGroup(localGroup, autoCenter);
+      return finalizeInScene ? finalizeImportedGroup(localGroup, autoCenter) : localGroup;
     }
   } catch (error) {
     console.warn("Fallback para parser DXF padrao em:", filename, error);
@@ -3976,7 +4013,7 @@ function addDxfToScene(
     return false;
   }
   if (typeof onBuiltGroup === "function") onBuiltGroup(localGroup);
-  return finalizeImportedGroup(localGroup, autoCenter);
+  return finalizeInScene ? finalizeImportedGroup(localGroup, autoCenter) : localGroup;
 }
 
 async function importSingleFileBrowserPipeline(
@@ -4108,6 +4145,12 @@ const sheetMarginBottomInput = document.getElementById("sheetMB");
 const sheetMarginLeftInput = document.getElementById("sheetML");
 const sheetMarginRightInput = document.getElementById("sheetMR");
 const sheetSpacingInput = document.getElementById("sheetS");
+const inventoryListEl = document.getElementById("inventoryList");
+const inventorySummaryEl = document.getElementById("inventorySummary");
+const inventorySearchInput = document.getElementById("inventorySearch");
+const inventoryTypeFilterEl = document.getElementById("inventoryTypeFilter");
+const mountActiveSheetBtn = document.getElementById("mountActiveSheetBtn");
+const mountAllSheetsBtn = document.getElementById("mountAllSheetsBtn");
 
 if (runtimeModeEl) {
   runtimeModeEl.textContent = "Render: GPU (WebGL)";
@@ -4150,12 +4193,403 @@ function updateCacheStatsBadge(stats = null) {
     (errors > 0 ? ` ERR:${errors}` : "");
 }
 
-function getSelectedPartCode(part) {
-  const rawName = String(part?.name || "").trim();
-  if (!rawName) return "-";
-  const fileName = rawName.split(/[\\/]/).pop() || rawName;
+function extractPartCodeFromName(rawName) {
+  const raw = String(rawName || "").trim();
+  if (!raw) return "-";
+  const fileName = raw.split(/[\\/]/).pop() || raw;
   const code = fileName.replace(/\.(dxf|step|stp)$/i, "").trim();
   return code || "-";
+}
+
+function formatInventoryTypeLabel(type) {
+  return String(type || "").toLowerCase() === PART_KIND_DXF ? ".DXF" : ".STEP";
+}
+
+function formatInventorySizeLabel(width, height) {
+  const w = Number(width);
+  const h = Number(height);
+  if (!Number.isFinite(w) || !Number.isFinite(h) || w <= EPS || h <= EPS) return "-";
+  return `${w.toFixed(0)} x ${h.toFixed(0)} mm`;
+}
+
+function buildInventoryMergeKey(type, code) {
+  return `${String(type || "").toLowerCase()}::${String(code || "").trim().toLowerCase()}`;
+}
+
+function createInventoryPreviewCanvas(width = 168, height = 96) {
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  return canvas;
+}
+
+function drawInventoryFallbackPreview(ctx, item, canvasWidth, canvasHeight) {
+  const w = Math.max(1, Number(item?.width || 1));
+  const h = Math.max(1, Number(item?.height || 1));
+  const pad = 12;
+  const availW = Math.max(1, canvasWidth - pad * 2);
+  const availH = Math.max(1, canvasHeight - pad * 2);
+  const scale = Math.min(availW / w, availH / h);
+  const rw = Math.max(2, w * scale);
+  const rh = Math.max(2, h * scale);
+  const ox = (canvasWidth - rw) * 0.5;
+  const oy = (canvasHeight - rh) * 0.5;
+
+  ctx.strokeStyle = "rgba(56, 189, 248, 0.9)";
+  ctx.lineWidth = 1.5;
+  ctx.strokeRect(ox, oy, rw, rh);
+  ctx.strokeStyle = "rgba(34, 197, 94, 0.55)";
+  ctx.beginPath();
+  ctx.moveTo(ox, oy);
+  ctx.lineTo(ox + rw, oy + rh);
+  ctx.moveTo(ox + rw, oy);
+  ctx.lineTo(ox, oy + rh);
+  ctx.stroke();
+}
+
+function drawDxfContourPreview(ctx, item, canvasWidth, canvasHeight) {
+  const contoursRaw = Array.isArray(item?.preParsed?.contours) ? item.preParsed.contours : [];
+  if (contoursRaw.length === 0) return false;
+
+  const contours = [];
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+
+  for (const contour of contoursRaw) {
+    const pointsRaw = Array.isArray(contour?.points) ? contour.points : [];
+    if (pointsRaw.length < 2) continue;
+    const points = [];
+    const stride = Math.max(1, Math.ceil(pointsRaw.length / 320));
+    for (let idx = 0; idx < pointsRaw.length; idx += stride) {
+      const p = pointsRaw[idx];
+      const x = Number(Array.isArray(p) ? p[0] : p?.x);
+      const y = Number(Array.isArray(p) ? p[1] : p?.y);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+      points.push({ x, y });
+      if (x < minX) minX = x;
+      if (y < minY) minY = y;
+      if (x > maxX) maxX = x;
+      if (y > maxY) maxY = y;
+    }
+    if (points.length >= 2) contours.push({ points, closed: !!contour?.closed });
+  }
+
+  if (contours.length === 0) return false;
+  const sourceW = Math.max(EPS, maxX - minX);
+  const sourceH = Math.max(EPS, maxY - minY);
+  const pad = 8;
+  const availW = Math.max(1, canvasWidth - pad * 2);
+  const availH = Math.max(1, canvasHeight - pad * 2);
+  const scale = Math.min(availW / sourceW, availH / sourceH);
+  const offsetX = pad + (availW - sourceW * scale) * 0.5 - minX * scale;
+  const offsetY = pad + (availH - sourceH * scale) * 0.5 + maxY * scale;
+
+  ctx.strokeStyle = "rgba(34, 197, 94, 0.92)";
+  ctx.lineWidth = 1.2;
+  ctx.lineJoin = "round";
+  ctx.lineCap = "round";
+
+  for (const contour of contours) {
+    const points = contour.points;
+    if (points.length < 2) continue;
+    ctx.beginPath();
+    for (let idx = 0; idx < points.length; idx += 1) {
+      const p = points[idx];
+      const px = offsetX + p.x * scale;
+      const py = offsetY - p.y * scale;
+      if (idx === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    }
+    if (contour.closed) ctx.closePath();
+    ctx.stroke();
+  }
+  return true;
+}
+
+function buildInventoryPreviewDataUrl(item) {
+  const canvas = createInventoryPreviewCanvas();
+  const ctx = canvas.getContext("2d", { alpha: false });
+  if (!ctx) return "";
+  const width = canvas.width;
+  const height = canvas.height;
+
+  ctx.fillStyle = "#0b1525";
+  ctx.fillRect(0, 0, width, height);
+  ctx.fillStyle = "rgba(15, 30, 52, 0.9)";
+  ctx.fillRect(1, 1, width - 2, height - 2);
+  ctx.strokeStyle = "rgba(56, 189, 248, 0.2)";
+  ctx.strokeRect(0.5, 0.5, width - 1, height - 1);
+
+  const drewDxf = String(item?.sourceType || "").toLowerCase() === PART_KIND_DXF
+    ? drawDxfContourPreview(ctx, item, width, height)
+    : false;
+  if (!drewDxf) drawInventoryFallbackPreview(ctx, item, width, height);
+
+  try {
+    return canvas.toDataURL("image/webp", 0.74);
+  } catch (_error) {
+    return canvas.toDataURL("image/png");
+  }
+}
+
+function findInventoryItemByMergeKey(mergeKey) {
+  const key = String(mergeKey || "");
+  if (!key) return null;
+  for (const item of inventoryItems) {
+    if (String(item?.mergeKey || "") === key) return item;
+  }
+  return null;
+}
+
+function applyInventoryPreviewToVisibleImages(mergeKey, srcUrl) {
+  if (!inventoryListEl || !srcUrl) return;
+  const thumbs = inventoryListEl.querySelectorAll("img.inventory-thumb");
+  for (const img of thumbs) {
+    if (!(img instanceof HTMLImageElement)) continue;
+    if (String(img.dataset.previewKey || "") !== String(mergeKey || "")) continue;
+    if (!img.src) img.src = srcUrl;
+  }
+}
+
+function scheduleInventoryPreviewBuild(mergeKey) {
+  const key = String(mergeKey || "");
+  if (!key || inventoryPreviewPending.has(key)) return;
+  inventoryPreviewPending.add(key);
+
+  const run = () => {
+    inventoryPreviewPending.delete(key);
+    if (inventoryPreviewCache.has(key)) {
+      applyInventoryPreviewToVisibleImages(key, inventoryPreviewCache.get(key));
+      return;
+    }
+    const item = findInventoryItemByMergeKey(key);
+    if (!item) return;
+    const previewDataUrl = buildInventoryPreviewDataUrl(item);
+    if (!previewDataUrl) return;
+    inventoryPreviewCache.set(key, previewDataUrl);
+    if (inventoryPreviewCache.size > 2600) {
+      const oldestKey = inventoryPreviewCache.keys().next().value;
+      if (oldestKey) inventoryPreviewCache.delete(oldestKey);
+    }
+    applyInventoryPreviewToVisibleImages(key, previewDataUrl);
+  };
+
+  if (typeof window.requestIdleCallback === "function") {
+    window.requestIdleCallback(run, { timeout: 900 });
+  } else {
+    window.setTimeout(run, 16);
+  }
+}
+
+function ensureInventoryPreviewObserver() {
+  if (inventoryPreviewObserver || !inventoryListEl) return;
+  inventoryPreviewObserver = new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue;
+      const target = entry.target;
+      if (!(target instanceof HTMLImageElement)) continue;
+      const mergeKey = String(target.dataset.previewKey || "");
+      if (!mergeKey) continue;
+      if (inventoryPreviewCache.has(mergeKey)) {
+        if (!target.src) target.src = inventoryPreviewCache.get(mergeKey);
+      } else {
+        scheduleInventoryPreviewBuild(mergeKey);
+      }
+      inventoryPreviewObserver.unobserve(target);
+    }
+  }, {
+    root: inventoryListEl,
+    rootMargin: "220px 0px"
+  });
+}
+
+function observeInventoryPreviewImages() {
+  if (!inventoryListEl) return;
+  ensureInventoryPreviewObserver();
+  const thumbs = inventoryListEl.querySelectorAll("img.inventory-thumb");
+  for (const img of thumbs) {
+    if (!(img instanceof HTMLImageElement)) continue;
+    const mergeKey = String(img.dataset.previewKey || "");
+    if (!mergeKey) continue;
+    if (inventoryPreviewCache.has(mergeKey)) {
+      if (!img.src) img.src = inventoryPreviewCache.get(mergeKey);
+      continue;
+    }
+    inventoryPreviewObserver?.observe(img);
+  }
+}
+
+function updateInventorySummary() {
+  if (!inventorySummaryEl) return;
+  const itemKinds = inventoryItems.length;
+  let totalUnits = 0;
+  for (const item of inventoryItems) totalUnits += Number(item.quantity || 0);
+  if (itemKinds === 0 || totalUnits <= 0) {
+    inventorySummaryEl.textContent = "Sem peças importadas";
+    return;
+  }
+  inventorySummaryEl.textContent = `${itemKinds} código(s) | ${totalUnits} peça(s)`;
+}
+
+function setInventoryBusyState(isBusy) {
+  inventoryBusy = !!isBusy;
+  if (mountActiveSheetBtn) mountActiveSheetBtn.disabled = inventoryBusy;
+  if (mountAllSheetsBtn) mountAllSheetsBtn.disabled = inventoryBusy;
+}
+
+function filteredInventoryItems() {
+  const query = String(inventoryFilterQuery || "").trim().toLowerCase();
+  const type = String(inventoryFilterType || "all").toLowerCase();
+  return inventoryItems.filter((item) => {
+    if (!item || Number(item.quantity || 0) <= 0) return false;
+    if (type !== "all" && String(item.sourceType || "").toLowerCase() !== type) return false;
+    if (!query) return true;
+    const code = String(item.code || "").toLowerCase();
+    return code.includes(query);
+  });
+}
+
+function createInventoryCardElement(item) {
+  const card = document.createElement("div");
+  card.className = "inventory-card";
+  card.dataset.itemId = String(item.id);
+  card.innerHTML =
+    `<div class="inventory-thumb-wrap">` +
+    `<img class="inventory-thumb" data-preview-key="${item.mergeKey}" alt="Preview ${item.code}" loading="lazy" decoding="async" />` +
+    `</div>` +
+    `<div class="inventory-card-code">${item.code}</div>` +
+    `<div class="inventory-card-meta">${formatInventorySizeLabel(item.width, item.height)}</div>` +
+    `<div class="inventory-card-meta">${formatInventoryTypeLabel(item.sourceType)}</div>` +
+    `<div class="inventory-qty-wrap">` +
+    `<span class="inventory-qty-label">pç:</span>` +
+    `<input class="inventory-qty-input" type="number" min="0" step="1" data-item-id="${item.id}" value="${Math.max(0, Math.round(Number(item.quantity || 0)))}" />` +
+    `</div>`;
+  return card;
+}
+
+function appendInventoryCardsRange(startIndex, endIndex) {
+  if (!inventoryListEl) return;
+  if (startIndex >= endIndex) return;
+  const fragment = document.createDocumentFragment();
+  for (let idx = startIndex; idx < endIndex; idx += 1) {
+    const item = inventoryRenderList[idx];
+    if (!item) continue;
+    fragment.appendChild(createInventoryCardElement(item));
+  }
+  inventoryListEl.appendChild(fragment);
+  observeInventoryPreviewImages();
+}
+
+function appendMoreInventoryCards() {
+  if (!inventoryListEl) return false;
+  const total = inventoryRenderList.length;
+  if (inventoryRenderLimit >= total) return false;
+  const nextLimit = Math.min(total, inventoryRenderLimit + INVENTORY_RENDER_CHUNK);
+  appendInventoryCardsRange(inventoryRenderLimit, nextLimit);
+  inventoryRenderLimit = nextLimit;
+  return true;
+}
+
+function fillInventoryUntilViewportFilled() {
+  if (!inventoryListEl) return;
+  while (
+    inventoryRenderLimit < inventoryRenderList.length &&
+    inventoryListEl.scrollHeight <= (inventoryListEl.clientHeight + 16)
+  ) {
+    if (!appendMoreInventoryCards()) break;
+  }
+}
+
+function updateInventoryListUi() {
+  updateInventorySummary();
+  if (!inventoryListEl) return;
+  inventoryListEl.innerHTML = "";
+  inventoryListEl.scrollTop = 0;
+  inventoryRenderList = filteredInventoryItems();
+  inventoryRenderLimit = 0;
+
+  if (inventoryRenderList.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "inventory-empty";
+    empty.textContent = "Importe DXF/STEP para criar o estoque de peças.";
+    inventoryListEl.appendChild(empty);
+    return;
+  }
+
+  const initialLimit = Math.min(inventoryRenderList.length, INVENTORY_RENDER_INITIAL);
+  appendInventoryCardsRange(0, initialLimit);
+  inventoryRenderLimit = initialLimit;
+  fillInventoryUntilViewportFilled();
+}
+
+function removeInventoryItemById(itemId) {
+  const id = Number(itemId);
+  const idx = inventoryItems.findIndex((entry) => Number(entry?.id) === id);
+  if (idx < 0) return false;
+  inventoryItems.splice(idx, 1);
+  return true;
+}
+
+function applyInventoryQuantity(itemId, quantityValue) {
+  const id = Number(itemId);
+  const idx = inventoryItems.findIndex((entry) => Number(entry?.id) === id);
+  if (idx < 0) return false;
+
+  const parsed = Number(quantityValue);
+  if (!Number.isFinite(parsed)) return false;
+  const normalized = Math.max(0, Math.round(parsed));
+  if (normalized <= 0) {
+    inventoryItems.splice(idx, 1);
+    return true;
+  }
+  inventoryItems[idx].quantity = normalized;
+  return true;
+}
+
+function upsertInventoryItem(payload) {
+  const code = extractPartCodeFromName(payload?.code || payload?.fileName || "");
+  if (code === "-") return false;
+  const sourceType = String(payload?.sourceType || "").toLowerCase() === PART_KIND_DXF ? PART_KIND_DXF : "step";
+  const key = buildInventoryMergeKey(sourceType, code);
+  const existing = inventoryItems.find((entry) => entry?.mergeKey === key);
+  if (existing) {
+    existing.quantity = Math.max(0, Number(existing.quantity || 0)) + Math.max(0, Number(payload?.quantity || 0));
+    if (!(Number(existing.width) > EPS) && Number(payload?.width) > EPS) existing.width = Number(payload.width);
+    if (!(Number(existing.height) > EPS) && Number(payload?.height) > EPS) existing.height = Number(payload.height);
+    if (!existing.dxfText && payload?.dxfText) existing.dxfText = payload.dxfText;
+    if (!existing.stepText && payload?.stepText) existing.stepText = payload.stepText;
+    if (!existing.preParsed && payload?.preParsed) existing.preParsed = payload.preParsed;
+    if (!existing.fileName && payload?.fileName) existing.fileName = String(payload.fileName);
+    if (!existing.meshCacheKey && payload?.meshCacheKey) existing.meshCacheKey = String(payload.meshCacheKey);
+    if (!existing.stepPayload && payload?.stepPayload) existing.stepPayload = payload.stepPayload;
+    if (!existing.templateSnapshot && payload?.templateSnapshot) existing.templateSnapshot = payload.templateSnapshot;
+    return true;
+  }
+
+  inventoryItems.push({
+    id: inventoryNextId++,
+    mergeKey: key,
+    sourceType,
+    fileName: String(payload?.fileName || code),
+    code,
+    width: Number(payload?.width || 0),
+    height: Number(payload?.height || 0),
+    quantity: Math.max(1, Math.round(Number(payload?.quantity || 1))),
+    dxfText: payload?.dxfText || "",
+    preParsed: payload?.preParsed || null,
+    sourceThickness: Number(payload?.sourceThickness || DEFAULT_PART_THICKNESS),
+    stepText: payload?.stepText || "",
+    meshCacheKey: payload?.meshCacheKey ? String(payload.meshCacheKey) : "",
+    stepPayload: payload?.stepPayload || null,
+    templateSnapshot: payload?.templateSnapshot || null
+  });
+  return true;
+}
+
+function getSelectedPartCode(part) {
+  return extractPartCodeFromName(part?.name || "");
 }
 
 function updateSelectedPieceBadge(part) {
@@ -4324,6 +4758,8 @@ updatePieceCountBadge();
 updateBatchTimeBadge(0);
 updateCacheStatsBadge(null);
 updateSelectedPieceBadge(null);
+setInventoryBusyState(false);
+updateInventoryListUi();
 ensureInitialSheet();
 updateSheetListUi();
 updateSheetInfoBadge();
@@ -4551,60 +4987,367 @@ async function importSingleStepFilePythonPipeline(
   return finalizeImportedGroup(localGroup, autoCenter);
 }
 
-fileInput.addEventListener("change", async (ev) => {
-  const files = [...(ev.target.files || [])];
-  if (files.length === 0) return;
+function computeGroupFootprint(group) {
+  if (!group) return null;
+  group.updateMatrixWorld(true);
+  tempBox.setFromObject(group);
+  if (tempBox.isEmpty()) return null;
+  return {
+    width: Math.max(0, Number(tempBox.max.x) - Number(tempBox.min.x)),
+    height: Math.max(0, Number(tempBox.max.y) - Number(tempBox.min.y))
+  };
+}
 
-  const importStart = performance.now();
-  const thickness = DEFAULT_PART_THICKNESS;
-  const autoCenter = DEFAULT_AUTO_CENTER;
-  const importIssues = [];
-  let importedCount = 0;
-  const workerPool = getDxfWorkerPool();
-  updateCacheStatsBadge({ mode: "browser" });
+function computeStepPayloadFootprint(payload) {
+  const mesh = payload?.mesh;
+  if (!mesh || mesh.format !== "stl_base64" || typeof mesh.data !== "string" || !mesh.data.length) return null;
+  const loader = new STLLoader();
+  const geometry = loader.parse(base64ToArrayBuffer(mesh.data));
+  if (!geometry || !(geometry instanceof THREE.BufferGeometry)) return null;
+  geometry.computeBoundingBox();
+  const bounds = geometry.boundingBox;
+  const width = bounds ? Number(bounds.max.x) - Number(bounds.min.x) : 0;
+  const height = bounds ? Number(bounds.max.y) - Number(bounds.min.y) : 0;
+  geometry.dispose();
+  return {
+    width: Math.max(0, width),
+    height: Math.max(0, height)
+  };
+}
 
-  await runWithConcurrency(files, DXF_PARSE_WORKERS, async (f) => {
-    try {
-      const ok = await importSingleFileBrowserPipeline(
-        f,
-        thickness,
-        autoCenter,
-        (msg) => importIssues.push(msg),
-        workerPool
-      );
-      if (ok) importedCount += 1;
-    } catch (error) {
-      console.error("Falha inesperada no modo DXF browser:", f?.name, error);
-      importIssues.push(`Falha inesperada ao importar ${f?.name || "arquivo"}. Veja o console (F12).`);
-    } finally {
-      updateBatchTimeBadge(performance.now() - importStart);
+async function prepareDxfInventoryItemFromFile(file, workerPool = null, onIssue = null) {
+  let fileBuffer = null;
+  try {
+    fileBuffer = await file.arrayBuffer();
+  } catch (error) {
+    reportImportIssue(onIssue, `Falha ao ler ${file?.name || "arquivo DXF"}.`);
+    return false;
+  }
+
+  const dxfText = decodeDxfArrayBuffer(fileBuffer, file?.name || "");
+  if (!dxfText.trim()) {
+    reportImportIssue(onIssue, `Conteudo vazio em ${file?.name || "arquivo DXF"}.`);
+    return false;
+  }
+
+  let parseCacheKey = "";
+  try {
+    parseCacheKey = await buildParsedCacheKey(fileBuffer);
+  } catch (_error) {
+    parseCacheKey = "";
+  }
+
+  let preParsed = null;
+  if (parseCacheKey) preParsed = await getParsedFromPersistentCache(parseCacheKey);
+  if (!isValidParsedPayload(preParsed)) {
+    const pool = workerPool ?? getDxfWorkerPool();
+    preParsed = pool ? await parseDxfWithWorkers(dxfText, file?.name || "") : null;
+    if (!isValidParsedPayload(preParsed)) {
+      reportImportIssue(onIssue, `Falha no parse de ${file?.name || "arquivo DXF"}.`);
+      return false;
     }
-  });
-
-  const importDurationMs = performance.now() - importStart;
-  updateBatchTimeBadge(importDurationMs);
-
-  if (importIssues.length > 0) {
-    const uniqueIssues = [...new Set(importIssues)];
-    for (const msg of uniqueIssues) console.warn("[Import warning]", msg);
-
-    if (importedCount === 0) {
-      const shownIssues = uniqueIssues.slice(0, 8);
-      const moreCount = uniqueIssues.length - shownIssues.length;
-      const body = shownIssues.map((msg, idx) => `${idx + 1}. ${msg}`).join("\n");
-      const suffix = moreCount > 0 ? `\n... e mais ${moreCount} aviso(s).` : "";
-      alert(`Nenhuma peca valida foi importada.\n\n${body}${suffix}`);
-    } else if (console && typeof console.info === "function") {
-      console.info(
-        `Importacao concluida com aviso(s): ${importedCount}/${files.length} arquivo(s) importado(s), ` +
-        `${uniqueIssues.length} aviso(s).`
-      );
+    if (parseCacheKey) {
+      await putParsedInPersistentCache(parseCacheKey, preParsed, file);
     }
   }
 
-  fitToScene();
-  fileInput.value = "";
-});
+  const width = Math.max(0, Number(preParsed?.width || 0));
+  const height = Math.max(0, Number(preParsed?.height || 0));
+  if (width <= EPS || height <= EPS) {
+    reportImportIssue(onIssue, `Nao foi possivel obter dimensoes validas para ${file?.name || "arquivo DXF"}.`);
+    return false;
+  }
+
+  return upsertInventoryItem({
+    sourceType: PART_KIND_DXF,
+    fileName: String(file?.name || "arquivo.dxf"),
+    code: String(file?.name || "arquivo.dxf"),
+    width,
+    height,
+    quantity: 1,
+    sourceThickness: DEFAULT_PART_THICKNESS,
+    dxfText,
+    preParsed
+  });
+}
+
+async function prepareStepInventoryItemFromFile(file, onIssue = null) {
+  let fileBuffer = null;
+  try {
+    fileBuffer = await file.arrayBuffer();
+  } catch (error) {
+    reportImportIssue(onIssue, `Falha ao ler ${file?.name || "arquivo STEP"}.`);
+    return false;
+  }
+
+  const stepText = decodeStepArrayBuffer(fileBuffer, file?.name || "");
+  if (!stepText.trim()) {
+    reportImportIssue(onIssue, `Conteudo vazio em ${file?.name || "arquivo STEP"}.`);
+    return false;
+  }
+
+  let meshCacheKey = "";
+  try {
+    const stepHash = await computeArrayBufferHashHex(fileBuffer);
+    meshCacheKey = buildStepMeshCacheKeyFromHash(stepHash);
+  } catch (_error) {
+    meshCacheKey = "";
+  }
+
+  let width = 0;
+  let height = 0;
+  let stepPayload = null;
+  let templateSnapshot = null;
+
+  if (meshCacheKey) {
+    const cachedGroup = await getMeshGroupFromPersistentCache(meshCacheKey, file?.name || "");
+    if (cachedGroup) {
+      const cachedFootprint = computeGroupFootprint(cachedGroup);
+      if (cachedFootprint) {
+        width = cachedFootprint.width;
+        height = cachedFootprint.height;
+      }
+      templateSnapshot = serializeMeshGroupSnapshot(cachedGroup, 0);
+      disposeObject3D(cachedGroup);
+    }
+  }
+
+  if (width <= EPS || height <= EPS) {
+    stepPayload = await importStepViaPython(stepText, file?.name || "arquivo.step");
+    if (!stepPayload?.ok) {
+      reportImportIssue(onIssue, String(stepPayload?.error || `Falha ao importar ${file?.name || "arquivo STEP"}.`));
+      return false;
+    }
+    const footprint = computeStepPayloadFootprint(stepPayload);
+    if (!footprint || footprint.width <= EPS || footprint.height <= EPS) {
+      reportImportIssue(onIssue, `Nao foi possivel obter dimensoes validas para ${file?.name || "arquivo STEP"}.`);
+      return false;
+    }
+    width = footprint.width;
+    height = footprint.height;
+  }
+
+  return upsertInventoryItem({
+    sourceType: "step",
+    fileName: String(file?.name || "arquivo.step"),
+    code: String(file?.name || "arquivo.step"),
+    width,
+    height,
+    quantity: 1,
+    stepText,
+    meshCacheKey,
+    stepPayload,
+    templateSnapshot
+  });
+}
+
+async function ensureInventoryTemplateSnapshot(item, onIssue = null) {
+  if (!item || Number(item.quantity || 0) <= 0) return false;
+  if (item.templateSnapshot) return true;
+
+  let templateGroup = null;
+  if (String(item.sourceType || "").toLowerCase() === PART_KIND_DXF) {
+    const built = addDxfToScene(
+      String(item.dxfText || ""),
+      String(item.fileName || `${item.code}.dxf`),
+      Number(item.sourceThickness || DEFAULT_PART_THICKNESS),
+      true,
+      onIssue,
+      item.preParsed || null,
+      null,
+      { finalizeInScene: false }
+    );
+    templateGroup = built && built.isObject3D ? built : null;
+  } else {
+    if (item.meshCacheKey) {
+      templateGroup = await getMeshGroupFromPersistentCache(item.meshCacheKey, item.fileName || "");
+    }
+    if (!templateGroup) {
+      let payload = item.stepPayload;
+      if (!payload?.ok) payload = await importStepViaPython(String(item.stepText || ""), item.fileName || "arquivo.step");
+      if (!payload?.ok) {
+        reportImportIssue(onIssue, String(payload?.error || `Falha ao montar ${item.fileName || "arquivo STEP"}.`));
+        return false;
+      }
+      item.stepPayload = payload;
+      templateGroup = buildGroupFromStepPayload(payload, item.fileName || "arquivo.step");
+      if (!templateGroup) {
+        reportImportIssue(onIssue, `Falha ao construir malha para ${item.fileName || "arquivo STEP"}.`);
+        return false;
+      }
+      if (item.meshCacheKey) {
+        await putMeshGroupInPersistentCache(item.meshCacheKey, templateGroup, { name: item.fileName || "" }, 0);
+      }
+    }
+  }
+
+  if (!templateGroup) return false;
+  const snapshotThickness = String(item.sourceType || "").toLowerCase() === PART_KIND_DXF
+    ? Number(item.sourceThickness || DEFAULT_PART_THICKNESS)
+    : 0;
+  const snapshot = serializeMeshGroupSnapshot(templateGroup, snapshotThickness);
+  disposeObject3D(templateGroup);
+  if (!snapshot) return false;
+  item.templateSnapshot = snapshot;
+  return true;
+}
+
+async function createSceneGroupFromInventoryItem(item, onIssue = null) {
+  const okTemplate = await ensureInventoryTemplateSnapshot(item, onIssue);
+  if (!okTemplate) return null;
+  const group = buildGroupFromMeshSnapshot(item.templateSnapshot, item.fileName || "");
+  if (!group) return null;
+  group.name = String(item.fileName || `${item.code || "peca"}.dxf`);
+  if (String(item.sourceType || "").toLowerCase() === PART_KIND_DXF) {
+    markPartAsDxf(group, Number(item.sourceThickness || DEFAULT_PART_THICKNESS));
+  }
+  return group;
+}
+
+function pruneEmptyInventoryItems() {
+  for (let idx = inventoryItems.length - 1; idx >= 0; idx -= 1) {
+    if (Number(inventoryItems[idx]?.quantity || 0) <= 0) inventoryItems.splice(idx, 1);
+  }
+}
+
+async function mountInventoryToSheets({ acrossAllSheets = false } = {}) {
+  if (inventoryBusy) return;
+  if (inventoryItems.length === 0) return;
+  ensureInitialSheet();
+
+  setInventoryBusyState(true);
+  const mountStart = performance.now();
+  const issues = [];
+  let placedCount = 0;
+
+  try {
+    const preferredSheet = getValidSheetIndex(activeSheetIndex) >= 0 ? getValidSheetIndex(activeSheetIndex) : 0;
+    for (const item of inventoryItems) {
+      if (!item || Number(item.quantity || 0) <= 0) continue;
+
+      while (Number(item.quantity || 0) > 0) {
+        const group = await createSceneGroupFromInventoryItem(item, (msg) => issues.push(msg));
+        if (!group) {
+          issues.push(`Falha ao montar template para ${item.code || item.fileName || "peça"}.`);
+          break;
+        }
+
+        const placed = finalizeImportedGroup(group, DEFAULT_AUTO_CENTER, {
+          preferredSheetIndex: preferredSheet,
+          allowCreateSheet: !!acrossAllSheets,
+          searchAllSheets: !!acrossAllSheets,
+          strictPlacement: true
+        });
+
+        if (!placed) break;
+        item.quantity = Math.max(0, Number(item.quantity || 0) - 1);
+        placedCount += 1;
+      }
+    }
+  } finally {
+    pruneEmptyInventoryItems();
+    updateInventoryListUi();
+    updateBatchTimeBadge(performance.now() - mountStart);
+    setInventoryBusyState(false);
+  }
+
+  if (issues.length > 0) {
+    const uniqueIssues = [...new Set(issues)];
+    for (const msg of uniqueIssues) console.warn("[Montagem estoque]", msg);
+  }
+
+  if (placedCount === 0 && inventoryItems.length > 0 && !acrossAllSheets) {
+    console.info("Nenhuma peça adicional coube na chapa ativa.");
+  }
+}
+
+if (inventorySearchInput) {
+  inventorySearchInput.addEventListener("input", () => {
+    inventoryFilterQuery = String(inventorySearchInput.value || "");
+    updateInventoryListUi();
+  });
+}
+
+if (inventoryTypeFilterEl) {
+  inventoryTypeFilterEl.addEventListener("change", () => {
+    inventoryFilterType = String(inventoryTypeFilterEl.value || "all").toLowerCase();
+    updateInventoryListUi();
+  });
+}
+
+if (inventoryListEl) {
+  inventoryListEl.addEventListener("scroll", () => {
+    if (inventoryRenderLimit >= inventoryRenderList.length) return;
+    const nearBottom =
+      inventoryListEl.scrollTop + inventoryListEl.clientHeight >=
+      inventoryListEl.scrollHeight - INVENTORY_SCROLL_PREFETCH_PX;
+    if (!nearBottom) return;
+    if (appendMoreInventoryCards()) fillInventoryUntilViewportFilled();
+  });
+
+  inventoryListEl.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    const target = event.target;
+    if (!(target instanceof HTMLInputElement) || !target.classList.contains("inventory-qty-input")) return;
+    event.preventDefault();
+    const itemId = Number(target.dataset.itemId);
+    const applied = applyInventoryQuantity(itemId, Number(target.value));
+    if (applied) updateInventoryListUi();
+  });
+}
+
+if (mountActiveSheetBtn) {
+  mountActiveSheetBtn.addEventListener("click", async () => {
+    await mountInventoryToSheets({ acrossAllSheets: false });
+  });
+}
+
+if (mountAllSheetsBtn) {
+  mountAllSheetsBtn.addEventListener("click", async () => {
+    await mountInventoryToSheets({ acrossAllSheets: true });
+  });
+}
+
+if (fileInput) {
+  fileInput.addEventListener("change", async (ev) => {
+    const files = [...(ev.target.files || [])].filter((f) => /\.dxf$/i.test(String(f?.name || "")));
+    if (files.length === 0) return;
+
+    const importStart = performance.now();
+    const importIssues = [];
+    let importedCount = 0;
+    const workerPool = getDxfWorkerPool();
+
+    await runWithConcurrency(files, DXF_PARSE_WORKERS, async (f) => {
+      try {
+        const ok = await prepareDxfInventoryItemFromFile(f, workerPool, (msg) => importIssues.push(msg));
+        if (ok) importedCount += 1;
+      } catch (error) {
+        console.error("Falha inesperada no import de estoque DXF:", f?.name, error);
+        importIssues.push(`Falha inesperada ao importar ${f?.name || "arquivo DXF"}.`);
+      } finally {
+        updateBatchTimeBadge(performance.now() - importStart);
+      }
+    });
+
+    updateBatchTimeBadge(performance.now() - importStart);
+    updateInventoryListUi();
+
+    if (importIssues.length > 0) {
+      const uniqueIssues = [...new Set(importIssues)];
+      for (const msg of uniqueIssues) console.warn("[Import warning]", msg);
+      if (importedCount === 0) {
+        const shownIssues = uniqueIssues.slice(0, 8);
+        const moreCount = uniqueIssues.length - shownIssues.length;
+        const body = shownIssues.map((msg, idx) => `${idx + 1}. ${msg}`).join("\n");
+        const suffix = moreCount > 0 ? `\n... e mais ${moreCount} aviso(s).` : "";
+        alert(`Nenhuma peça DXF válida foi importada.\n\n${body}${suffix}`);
+      }
+    }
+
+    fileInput.value = "";
+  });
+}
 
 if (stepInput) {
   stepInput.addEventListener("change", async (ev) => {
@@ -4612,69 +5355,36 @@ if (stepInput) {
     if (files.length === 0) return;
 
     const importStart = performance.now();
-    const autoCenter = DEFAULT_AUTO_CENTER;
     const importIssues = [];
-    const cacheStats = {
-      meshHits: 0,
-      meshMisses: 0,
-      meshSaves: 0,
-      parseHits: 0,
-      parseMisses: 0,
-      parseSaves: 0,
-      stepMeshHits: 0,
-      stepMeshMisses: 0,
-      stepMeshSaves: 0,
-      errors: 0
-    };
     let importedCount = 0;
-    updateCacheStatsBadge(cacheStats);
 
-    await Promise.all(files.map(async (f) => {
+    await runWithConcurrency(files, STEP_IMPORT_WORKERS, async (f) => {
       try {
-        const ok = await importSingleStepFilePythonPipeline(
-          f,
-          autoCenter,
-          (msg) => importIssues.push(msg),
-          (event) => {
-            const type = String(event?.type || "");
-            if (type === "step-mesh-hit") cacheStats.stepMeshHits += 1;
-            else if (type === "step-mesh-miss") cacheStats.stepMeshMisses += 1;
-            else if (type === "step-mesh-save") cacheStats.stepMeshSaves += 1;
-            else if (type.endsWith("-failed")) cacheStats.errors += 1;
-            updateCacheStatsBadge(cacheStats);
-          }
-        );
+        const ok = await prepareStepInventoryItemFromFile(f, (msg) => importIssues.push(msg));
         if (ok) importedCount += 1;
       } catch (error) {
-        console.error("Falha inesperada no modo STEP:", f?.name, error);
-        importIssues.push(`Falha inesperada ao importar ${f?.name || "arquivo STEP"}. Veja o console (F12).`);
+        console.error("Falha inesperada no import de estoque STEP:", f?.name, error);
+        importIssues.push(`Falha inesperada ao importar ${f?.name || "arquivo STEP"}.`);
       } finally {
         updateBatchTimeBadge(performance.now() - importStart);
       }
-    }));
+    });
 
-    const importDurationMs = performance.now() - importStart;
-    updateBatchTimeBadge(importDurationMs);
+    updateBatchTimeBadge(performance.now() - importStart);
+    updateInventoryListUi();
 
     if (importIssues.length > 0) {
       const uniqueIssues = [...new Set(importIssues)];
       for (const msg of uniqueIssues) console.warn("[Import warning]", msg);
-
       if (importedCount === 0) {
         const shownIssues = uniqueIssues.slice(0, 8);
         const moreCount = uniqueIssues.length - shownIssues.length;
         const body = shownIssues.map((msg, idx) => `${idx + 1}. ${msg}`).join("\n");
         const suffix = moreCount > 0 ? `\n... e mais ${moreCount} aviso(s).` : "";
-        alert(`Nenhuma peca STEP valida foi importada.\n\n${body}${suffix}`);
-      } else if (console && typeof console.info === "function") {
-        console.info(
-          `Importacao STEP concluida com aviso(s): ${importedCount}/${files.length} arquivo(s) importado(s), ` +
-          `${uniqueIssues.length} aviso(s).`
-        );
+        alert(`Nenhuma peça STEP válida foi importada.\n\n${body}${suffix}`);
       }
     }
 
-    fitToScene();
     stepInput.value = "";
   });
 }
@@ -4691,10 +5401,14 @@ clearBtn.addEventListener("click", () => {
     partsGroup.remove(child);
     disposeObject3D(child);
   }
+  inventoryItems.length = 0;
+  inventoryPreviewCache.clear();
+  inventoryPreviewPending.clear();
   updateGlobalBounds();
   updatePieceCountBadge();
   updateSheetListUi();
   updateSheetInfoBadge();
+  updateInventoryListUi();
 });
 
 window.addEventListener("beforeunload", () => {

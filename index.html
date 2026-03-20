@@ -51,6 +51,25 @@
     <div id="viewportWrap">
       <div id="viewport"></div>
     </div>
+    <aside id="inventoryDock">
+      <div class="inventory-dock-head">
+        <div class="inventory-dock-title">Peças importadas</div>
+        <div class="inventory-actions">
+          <button id="mountActiveSheetBtn" type="button" class="btn secondary">Chapa</button>
+          <button id="mountAllSheetsBtn" type="button" class="btn secondary">Montar chapas</button>
+        </div>
+        <div class="inventory-filters">
+          <input id="inventorySearch" type="search" placeholder="Buscar código..." autocomplete="off" />
+          <select id="inventoryTypeFilter">
+            <option value="all">Todos</option>
+            <option value="dxf">.DXF</option>
+            <option value="step">.STEP</option>
+          </select>
+        </div>
+        <div id="inventorySummary" class="inventory-dock-sub">Sem peças importadas</div>
+      </div>
+      <div id="inventoryList" class="inventory-grid"></div>
+    </aside>
   </div>
 
   <div id="help">
@@ -109,6 +128,6 @@
     })();
   </script>
 
-  <script type="module" src="./app.js?v=layoutSheets2-gpuonly-editfix15"></script>
+  <script type="module" src="./app.js?v=layoutSheets2-gpuonly-editfix16"></script>
 </body>
 </html>
