@@ -952,15 +952,22 @@ function createSheetBorderLine(minX, minY, maxX, maxY, colorHex) {
   return new THREE.Line(geometry, material);
 }
 
-function createSheetVolumeEdges(boxGeometry, colorHex) {
-  const edgeGeometry = new THREE.EdgesGeometry(boxGeometry);
-  const edgeMaterial = new THREE.LineBasicMaterial({
+function createSheetThicknessGuides(minX, minY, maxX, maxY, topZ, bottomZ, colorHex) {
+  const vertices = new Float32Array([
+    minX, minY, topZ, minX, minY, bottomZ,
+    maxX, minY, topZ, maxX, minY, bottomZ,
+    maxX, maxY, topZ, maxX, maxY, bottomZ,
+    minX, maxY, topZ, minX, maxY, bottomZ
+  ]);
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.BufferAttribute(vertices, 3));
+  const material = new THREE.LineBasicMaterial({
     color: colorHex,
     transparent: true,
     opacity: 0.92,
     toneMapped: false
   });
-  return new THREE.LineSegments(edgeGeometry, edgeMaterial);
+  return new THREE.LineSegments(geometry, material);
 }
 
 function rebuildSheetsVisuals() {
@@ -993,12 +1000,16 @@ function rebuildSheetsVisuals() {
     bodyMesh.userData.sheetIndex = idx;
     wrapper.add(bodyMesh);
 
-    const thicknessEdges = createSheetVolumeEdges(
-      bodyGeo,
+    const thicknessGuides = createSheetThicknessGuides(
+      Number(sheet.originX),
+      Number(sheet.originY),
+      Number(sheet.originX) + Number(sheet.width),
+      Number(sheet.originY) + Number(sheet.height),
+      0,
+      -thickness,
       isActive ? 0x22d3ee : 0x475569
     );
-    thicknessEdges.position.set(centerX, centerY, plateZ);
-    wrapper.add(thicknessEdges);
+    wrapper.add(thicknessGuides);
 
     const border = createSheetBorderLine(
       Number(sheet.originX),
@@ -1009,17 +1020,6 @@ function rebuildSheetsVisuals() {
     );
     border.position.z = 0.35;
     wrapper.add(border);
-
-    const usable = getSheetUsableBounds(sheet, sheet.originX, sheet.originY);
-    const usableBorder = createSheetBorderLine(
-      usable.minX,
-      usable.minY,
-      usable.maxX,
-      usable.maxY,
-      isActive ? 0x22c55e : 0x4b5563
-    );
-    usableBorder.position.z = 0.55;
-    wrapper.add(usableBorder);
 
     sheetsGroup.add(wrapper);
   }
