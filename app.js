@@ -1010,6 +1010,17 @@ function rebuildSheetsVisuals() {
     border.position.z = 0.35;
     wrapper.add(border);
 
+    const usable = getSheetUsableBounds(sheet, sheet.originX, sheet.originY);
+    const usableBorder = createSheetBorderLine(
+      usable.minX,
+      usable.minY,
+      usable.maxX,
+      usable.maxY,
+      isActive ? 0x22c55e : 0x4b5563
+    );
+    usableBorder.position.z = 0.55;
+    wrapper.add(usableBorder);
+
     sheetsGroup.add(wrapper);
   }
 }
