@@ -84,6 +84,7 @@ const SHEET_RING_TRANSITION_MS = 420;
 const CAMERA_NEAR_MIN = 0.8;
 const CAMERA_NEAR_MAX = 120;
 const CAMERA_FAR_MARGIN = 3.2;
+const PART_KIND_DXF = "dxf";
 const DEFAULT_PART_THICKNESS = 5;
 const DEFAULT_AUTO_CENTER = true;
 const EPS = 1e-6;
@@ -858,9 +859,76 @@ function getPartSizeXY(part) {
   return { width, height, bounds };
 }
 
+function isDxfPart(part) {
+  const explicitKind = String(part?.userData?.partKind || "").toLowerCase();
+  if (explicitKind) return explicitKind === PART_KIND_DXF;
+  return /\.dxf$/i.test(String(part?.name || ""));
+}
+
+function ensureDxfPartMetadata(part, fallbackThickness = DEFAULT_PART_THICKNESS) {
+  if (!part || !isDxfPart(part)) return false;
+  if (!part.userData || typeof part.userData !== "object") part.userData = {};
+  part.userData.partKind = PART_KIND_DXF;
+
+  const baseScale = Number(part.userData.baseDxfScaleZ);
+  if (!Number.isFinite(baseScale) || Math.abs(baseScale) <= EPS) {
+    const currentScaleZ = Number(part.scale?.z || 1);
+    part.userData.baseDxfScaleZ = Number.isFinite(currentScaleZ) && Math.abs(currentScaleZ) > EPS
+      ? currentScaleZ
+      : 1;
+  }
+
+  const baseThickness = Number(part.userData.baseDxfThickness);
+  if (!Number.isFinite(baseThickness) || baseThickness <= EPS) {
+    const fallback = Number(part.userData.appliedDxfThickness || fallbackThickness || DEFAULT_PART_THICKNESS);
+    part.userData.baseDxfThickness = Math.max(0.1, Number.isFinite(fallback) ? fallback : DEFAULT_PART_THICKNESS);
+  }
+  return true;
+}
+
+function markPartAsDxf(part, sourceThickness = DEFAULT_PART_THICKNESS) {
+  if (!part) return;
+  const baseThickness = Math.max(0.1, Number(sourceThickness || DEFAULT_PART_THICKNESS));
+  if (!part.userData || typeof part.userData !== "object") part.userData = {};
+  part.userData.partKind = PART_KIND_DXF;
+  part.userData.baseDxfThickness = baseThickness;
+  part.userData.baseDxfScaleZ = Math.abs(Number(part.scale?.z || 1)) > EPS ? Number(part.scale?.z || 1) : 1;
+  part.userData.appliedDxfThickness = baseThickness;
+}
+
+function applyDxfThicknessForSheet(part, sheet) {
+  if (!part || !sheet) return false;
+  if (!ensureDxfPartMetadata(part, Number(sheet.thickness || DEFAULT_PART_THICKNESS))) return false;
+
+  const baseThickness = Math.max(0.1, Number(part.userData.baseDxfThickness || DEFAULT_PART_THICKNESS));
+  const baseScaleZ = Number(part.userData.baseDxfScaleZ || 1);
+  const targetThickness = Math.max(0.1, Number(sheet.thickness || baseThickness));
+  const desiredScaleZ = baseScaleZ * (targetThickness / baseThickness);
+  const currentScaleZ = Number(part.scale?.z || 1);
+  let changed = false;
+
+  if (Number.isFinite(desiredScaleZ) && Math.abs(currentScaleZ - desiredScaleZ) > 1e-6) {
+    part.scale.z = desiredScaleZ;
+    changed = true;
+  }
+  part.userData.appliedDxfThickness = targetThickness;
+  return changed;
+}
+
 function setPartZForSheet(part, sheet) {
   if (!part || !sheet) return;
-  const baseZ = Number(sheet.originZ || 0) + SHEET_PART_ELEVATION;
+  applyDxfThicknessForSheet(part, sheet);
+
+  let zOffset = SHEET_PART_ELEVATION;
+  if (isDxfPart(part)) {
+    const dxfThickness = Math.max(
+      0.1,
+      Number(part.userData?.appliedDxfThickness || sheet.thickness || DEFAULT_PART_THICKNESS)
+    );
+    zOffset += dxfThickness * 0.5;
+  }
+
+  const baseZ = Number(sheet.originZ || 0) + zOffset;
   part.position.z = THREE.MathUtils.clamp(
     Number(part.position.z || baseZ),
     baseZ - SHEET_PART_Z_CLAMP,
@@ -3688,6 +3756,7 @@ function addDxfToScene(
 
   const localGroup = new THREE.Group();
   localGroup.name = filename;
+  markPartAsDxf(localGroup, thickness);
 
   // Prefer the CNC contour pipeline first (same logic used in the CNC flow).
   // It is lighter and handles many malformed/open contour cases better.

@@ -19,6 +19,7 @@ Permitir importacao e visualizacao 3D de pecas DXF/STEP com um layout de produca
 - `styles.css`: tema e layout responsivo
 - `app.js`: renderizacao Three.js, importacao DXF browser-only, importacao STEP, selecao/transform, estado de chapas
 - `app.js`: inclui ajuste dinamico de `near/far` da camera para reduzir artefatos de profundidade em zoom distante
+- `app.js`: sincroniza espessura das pecas DXF com a espessura da chapa (STEP permanece com logica propria)
 - `sheet-layout.js`: funcoes puras de layout (origem de chapas, area util, encaixe sem colisao)
 - `dxf-worker.js`: parse DXF em paralelo no browser
 
