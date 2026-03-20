@@ -20,7 +20,7 @@ const container = document.getElementById("viewport");
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x0b0f14);
 
-const camera = new THREE.PerspectiveCamera(55, 1, 0.1, 500000);
+const camera = new THREE.PerspectiveCamera(55, 1, 1, 120000);
 camera.position.set(2100, 1300, 2300);
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -65,6 +65,7 @@ const bboxAll = new THREE.Box3();
 const tempBox = new THREE.Box3();
 const tempVec = new THREE.Vector3();
 const sheetTempBox = new THREE.Box3();
+const cameraDepthSizeVec = new THREE.Vector3();
 
 const raycaster = new THREE.Raycaster();
 const pointerNdc = new THREE.Vector2();
@@ -80,6 +81,9 @@ const SHEET_PART_ELEVATION = 2.4;
 const SHEET_PART_Z_CLAMP = 16;
 const SHEET_RING_MIN_RADIUS = 1800;
 const SHEET_RING_TRANSITION_MS = 420;
+const CAMERA_NEAR_MIN = 0.8;
+const CAMERA_NEAR_MAX = 120;
+const CAMERA_FAR_MARGIN = 3.2;
 const DEFAULT_PART_THICKNESS = 5;
 const DEFAULT_AUTO_CENTER = true;
 const EPS = 1e-6;
@@ -1132,6 +1136,10 @@ function rebuildSheetsVisuals() {
       metalness: 0.02,
       transparent: true,
       opacity: 0.72,
+      depthWrite: false,
+      polygonOffset: true,
+      polygonOffsetFactor: 1,
+      polygonOffsetUnits: 1,
       emissive: 0x000000,
       emissiveIntensity: 0
     });
@@ -3964,6 +3972,25 @@ function updateGlobalBounds() {
   }
 }
 
+function updateCameraDepthRange({
+  maxDimension = 0,
+  cameraDistance = 0
+} = {}) {
+  const maxDim = Math.max(1, Number(maxDimension || 0));
+  const dist = Math.max(1, Number(cameraDistance || 0));
+  const nearCandidate = THREE.MathUtils.clamp(dist / 420, CAMERA_NEAR_MIN, CAMERA_NEAR_MAX);
+  const farCandidate = Math.max(
+    nearCandidate + 4000,
+    dist + maxDim * CAMERA_FAR_MARGIN
+  );
+
+  if (Math.abs(camera.near - nearCandidate) > 1e-3 || Math.abs(camera.far - farCandidate) > 1e-1) {
+    camera.near = nearCandidate;
+    camera.far = farCandidate;
+    camera.updateProjectionMatrix();
+  }
+}
+
 function fitToScene(padding = 1.25) {
   if (bboxAll.isEmpty()) return;
 
@@ -3978,6 +4005,10 @@ function fitToScene(padding = 1.25) {
 
   const dirVec = new THREE.Vector3(1, 1, 1).normalize();
   camera.position.copy(center.clone().add(dirVec.multiplyScalar(dist * padding)));
+  updateCameraDepthRange({
+    maxDimension: maxDim,
+    cameraDistance: camera.position.distanceTo(center)
+  });
 
   controls.target.copy(center);
   controls.update();
@@ -4610,6 +4641,14 @@ window.addEventListener("beforeunload", () => {
 // ---------------------------
 function animate() {
   requestAnimationFrame(animate);
+  if (!bboxAll.isEmpty()) {
+    bboxAll.getSize(cameraDepthSizeVec);
+    const maxDim = Math.max(cameraDepthSizeVec.x, cameraDepthSizeVec.y, cameraDepthSizeVec.z);
+    updateCameraDepthRange({
+      maxDimension: maxDim,
+      cameraDistance: camera.position.distanceTo(controls.target)
+    });
+  }
   updateSheetRingTransition(performance.now());
   controls.update();
   renderer.render(scene, camera);
