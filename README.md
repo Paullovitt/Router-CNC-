@@ -79,12 +79,13 @@ Abra no navegador:
 1. Clique em `Importar DXF(s)` ou `Importar STEP(s)`.
 2. Use `Nova chapa` para criar outra chapa.
 3. Clique em uma chapa no painel lateral para ativar.
-4. Use `Mover para chapa` para enviar a peca selecionada para a chapa ativa.
-5. Use `Editar chapa` para ajustar largura, altura, margens e espacamento.
-6. No modal:
+4. As chapas ficam em layout circular no viewport; ao selecionar outra chapa, ocorre transicao para trazer a selecionada ao centro (sem giro continuo).
+5. Use `Mover para chapa` para enviar a peca selecionada para a chapa ativa.
+6. Use `Editar chapa` para ajustar largura, altura, margens e espacamento.
+7. No modal:
    - `Aplicar`: altera somente a chapa ativa.
    - `Aplicar em todas`: altera todas as chapas atuais e vira padrao para novas chapas.
-7. Clique em `Enquadrar (Fit)` para centralizar a visualizacao.
+8. Clique em `Enquadrar (Fit)` para centralizar a visualizacao.
 
 ## Principais modulos/funcoes
 

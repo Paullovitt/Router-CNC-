@@ -8,7 +8,6 @@ import DxfParser from "https://esm.sh/dxf-parser@1.1.2";
 import {
   DEFAULT_SHEET_CONFIG,
   normalizeSheetConfig,
-  buildSheetOrigins,
   getSheetUsableBounds,
   findPlacementOnSheet
 } from "./sheet-layout.js";
@@ -79,6 +78,8 @@ let pointerMoved = false;
 const SHEET_GAP = 260;
 const SHEET_PART_ELEVATION = 2.4;
 const SHEET_PART_Z_CLAMP = 16;
+const SHEET_RING_MIN_RADIUS = 1800;
+const SHEET_RING_TRANSITION_MS = 420;
 const DEFAULT_PART_THICKNESS = 5;
 const DEFAULT_AUTO_CENTER = true;
 const EPS = 1e-6;
@@ -794,6 +795,7 @@ function getCachedPartBounds(part) {
 const sheetState = [];
 let activeSheetIndex = 0;
 let sheetCreationTemplate = normalizeSheetConfig(DEFAULT_SHEET_CONFIG, DEFAULT_SHEET_CONFIG);
+let sheetRingTransition = null;
 
 function getValidSheetIndex(index) {
   const numeric = Number(index);
@@ -804,7 +806,12 @@ function getValidSheetIndex(index) {
 }
 
 function cloneSheetConfig(config) {
-  return { ...normalizeSheetConfig(config, DEFAULT_SHEET_CONFIG), originX: 0, originY: 0 };
+  return {
+    ...normalizeSheetConfig(config, DEFAULT_SHEET_CONFIG),
+    originX: 0,
+    originY: 0,
+    originZ: 0
+  };
 }
 
 function getSheetCreationTemplate() {
@@ -847,6 +854,28 @@ function getPartSizeXY(part) {
   return { width, height, bounds };
 }
 
+function setPartZForSheet(part, sheet) {
+  if (!part || !sheet) return;
+  const baseZ = Number(sheet.originZ || 0) + SHEET_PART_ELEVATION;
+  part.position.z = THREE.MathUtils.clamp(
+    Number(part.position.z || baseZ),
+    baseZ - SHEET_PART_Z_CLAMP,
+    baseZ + SHEET_PART_Z_CLAMP
+  );
+}
+
+function shiftPartBoundsCache(part, dx, dy, dz) {
+  const cached = part?.userData?.layoutBounds;
+  if (!(cached instanceof THREE.Box3)) return false;
+  cached.min.x += dx;
+  cached.max.x += dx;
+  cached.min.y += dy;
+  cached.max.y += dy;
+  cached.min.z += dz;
+  cached.max.z += dz;
+  return true;
+}
+
 function clampPartToSheet(part) {
   if (!part) return false;
   const sheetIndex = getValidSheetIndex(part.userData?.sheetIndex);
@@ -869,7 +898,7 @@ function clampPartToSheet(part) {
     part.position.x += dx;
     part.position.y += dy;
   }
-  part.position.z = THREE.MathUtils.clamp(Number(part.position.z || 0), -SHEET_PART_Z_CLAMP, SHEET_PART_Z_CLAMP);
+  setPartZForSheet(part, sheet);
   cachePartBounds(part);
   return true;
 }
@@ -896,33 +925,152 @@ function tryPlacePartOnSheet(part, sheetIndex) {
   const dy = Number(placement.y) - Number(partSize.bounds.min.y);
   part.position.x += dx;
   part.position.y += dy;
-  if (Number(part.position.z || 0) < SHEET_PART_ELEVATION) {
-    part.position.z = SHEET_PART_ELEVATION;
-  }
+  setPartZForSheet(part, sheet);
   part.userData.sheetIndex = idx;
   cachePartBounds(part);
   return true;
 }
 
-function syncSheetsOrigins({ preservePartPositions = true } = {}) {
-  const oldOrigins = sheetState.map((sheet) => Number(sheet.originX || 0));
-  const newOrigins = buildSheetOrigins(sheetState, SHEET_GAP);
+function stopSheetRingTransition() {
+  sheetRingTransition = null;
+}
+
+function getSheetOriginsSnapshot() {
+  return sheetState.map((sheet) => ({
+    x: Number(sheet.originX || 0),
+    y: Number(sheet.originY || 0),
+    z: Number(sheet.originZ || 0)
+  }));
+}
+
+function computeSheetRingOrigins(targetActiveIndex = activeSheetIndex) {
+  const total = sheetState.length;
+  if (total === 0) return [];
+
+  const safeActive = Math.max(0, Math.min(total - 1, Number(targetActiveIndex) || 0));
+  let maxWidth = 0;
+  for (const sheet of sheetState) {
+    const width = Number(sheet?.width || 0);
+    if (Number.isFinite(width) && width > maxWidth) maxWidth = width;
+  }
+  maxWidth = Math.max(maxWidth, 1200);
+
+  const circumferenceTarget = total * (maxWidth + SHEET_GAP);
+  const radius = Math.max(SHEET_RING_MIN_RADIUS, circumferenceTarget / (Math.PI * 2));
+  const angleStep = (Math.PI * 2) / Math.max(1, total);
+  const frontAngle = Math.PI * 0.5;
+  const origins = [];
+
+  for (let idx = 0; idx < total; idx += 1) {
+    const angle = frontAngle + (idx - safeActive) * angleStep;
+    const centerX = Math.cos(angle) * radius;
+    const centerZ = Math.sin(angle) * radius;
+    const sheet = sheetState[idx];
+    origins.push({
+      originX: centerX - Number(sheet.width) * 0.5,
+      originY: 0,
+      originZ: centerZ
+    });
+  }
+  return origins;
+}
+
+function applySheetOriginsFromArray(origins, { preservePartPositions = true } = {}) {
+  const oldOrigins = getSheetOriginsSnapshot();
   for (let i = 0; i < sheetState.length; i += 1) {
-    sheetState[i].originX = Number(newOrigins[i] || 0);
-    sheetState[i].originY = 0;
+    const next = origins[i] || {};
+    sheetState[i].originX = Number(next.originX || 0);
+    sheetState[i].originY = Number(next.originY || 0);
+    sheetState[i].originZ = Number(next.originZ || 0);
   }
   if (!preservePartPositions) return;
 
   for (const part of partsGroup.children) {
     const sheetIndex = getValidSheetIndex(part.userData?.sheetIndex);
     if (sheetIndex < 0) continue;
-    const previous = Number(oldOrigins[sheetIndex] || 0);
-    const current = Number(sheetState[sheetIndex]?.originX || 0);
-    const delta = current - previous;
-    if (Math.abs(delta) <= EPS) continue;
-    part.position.x += delta;
-    cachePartBounds(part);
+    const prev = oldOrigins[sheetIndex];
+    const current = sheetState[sheetIndex];
+    if (!prev || !current) continue;
+    const dx = Number(current.originX || 0) - Number(prev.x || 0);
+    const dz = Number(current.originZ || 0) - Number(prev.z || 0);
+    if (Math.abs(dx) > EPS) part.position.x += dx;
+    if (Math.abs(dz) > EPS) part.position.z += dz;
+    if (!shiftPartBoundsCache(part, dx, 0, dz)) cachePartBounds(part);
   }
+}
+
+function syncSheetsOrigins({ preservePartPositions = true } = {}) {
+  stopSheetRingTransition();
+  const targets = computeSheetRingOrigins(activeSheetIndex);
+  applySheetOriginsFromArray(targets, { preservePartPositions });
+}
+
+function startSheetRingTransition(durationMs = SHEET_RING_TRANSITION_MS) {
+  stopSheetRingTransition();
+  if (sheetState.length <= 1) {
+    syncSheetsOrigins({ preservePartPositions: true });
+    rebuildSheetsVisuals();
+    updateGlobalBounds();
+    return;
+  }
+
+  const startOrigins = getSheetOriginsSnapshot();
+  const targetOrigins = computeSheetRingOrigins(activeSheetIndex).map((origin) => ({
+    x: Number(origin.originX || 0),
+    y: Number(origin.originY || 0),
+    z: Number(origin.originZ || 0)
+  }));
+
+  let changed = false;
+  for (let i = 0; i < startOrigins.length; i += 1) {
+    const start = startOrigins[i];
+    const target = targetOrigins[i];
+    if (!start || !target) continue;
+    if (Math.abs(start.x - target.x) > EPS || Math.abs(start.z - target.z) > EPS) {
+      changed = true;
+      break;
+    }
+  }
+  if (!changed) {
+    syncSheetsOrigins({ preservePartPositions: true });
+    rebuildSheetsVisuals();
+    updateGlobalBounds();
+    return;
+  }
+
+  sheetRingTransition = {
+    startAt: performance.now(),
+    durationMs: Math.max(120, Number(durationMs || SHEET_RING_TRANSITION_MS)),
+    from: startOrigins,
+    to: targetOrigins
+  };
+}
+
+function updateSheetRingTransition(nowMs = performance.now()) {
+  if (!sheetRingTransition) return false;
+  const elapsed = nowMs - Number(sheetRingTransition.startAt || nowMs);
+  const duration = Math.max(1, Number(sheetRingTransition.durationMs || SHEET_RING_TRANSITION_MS));
+  const t = THREE.MathUtils.clamp(elapsed / duration, 0, 1);
+  const eased = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+
+  const interpolated = sheetRingTransition.from.map((start, idx) => {
+    const target = sheetRingTransition.to[idx] || start;
+    return {
+      originX: THREE.MathUtils.lerp(Number(start?.x || 0), Number(target?.x || 0), eased),
+      originY: 0,
+      originZ: THREE.MathUtils.lerp(Number(start?.z || 0), Number(target?.z || 0), eased)
+    };
+  });
+  applySheetOriginsFromArray(interpolated, { preservePartPositions: true });
+  rebuildSheetsVisuals();
+
+  if (t >= 1) {
+    stopSheetRingTransition();
+    updateGlobalBounds();
+    updateSheetListUi();
+    updateSheetInfoBadge();
+  }
+  return true;
 }
 
 function clearSheetVisuals() {
@@ -972,7 +1120,7 @@ function rebuildSheetsVisuals() {
     const centerX = Number(sheet.originX) + Number(sheet.width) * 0.5;
     const centerY = Number(sheet.originY) + Number(sheet.height) * 0.5;
     const thickness = Math.max(0.8, Number(sheet.thickness || 1));
-    const plateZ = -thickness * 0.5;
+    const plateZ = Number(sheet.originZ || 0) - thickness * 0.5;
 
     const wrapper = new THREE.Group();
     wrapper.name = `sheet-${idx + 1}`;
@@ -1006,7 +1154,7 @@ function rebuildSheetsVisuals() {
       Number(sheet.originY) + Number(sheet.height),
       isActive ? 0x38bdf8 : 0x64748b
     );
-    border.position.z = 0.35;
+    border.position.z = Number(sheet.originZ || 0) + 0.35;
     wrapper.add(border);
 
     const usable = getSheetUsableBounds(sheet, sheet.originX, sheet.originY);
@@ -1017,7 +1165,7 @@ function rebuildSheetsVisuals() {
       usable.maxY,
       isActive ? 0x22c55e : 0x4b5563
     );
-    usableBorder.position.z = 0.55;
+    usableBorder.position.z = Number(sheet.originZ || 0) + 0.55;
     wrapper.add(usableBorder);
 
     sheetsGroup.add(wrapper);
@@ -1078,11 +1226,7 @@ function assignPartToSheet(
 
   if (allowCreateSheet) {
     sheetState.push(createSheetFrom());
-    syncSheetsOrigins({ preservePartPositions: true });
-    activeSheetIndex = sheetState.length - 1;
-    rebuildSheetsVisuals();
-    updateSheetListUi();
-    updateSheetInfoBadge();
+    setActiveSheet(sheetState.length - 1, { animate: false });
 
     if (tryPlacePartOnSheet(part, activeSheetIndex)) return true;
   }
@@ -1100,13 +1244,21 @@ function ensureInitialSheet() {
   rebuildSheetsVisuals();
 }
 
-function setActiveSheet(index) {
+function setActiveSheet(index, { animate = false } = {}) {
   const idx = getValidSheetIndex(index);
   if (idx < 0) return;
   activeSheetIndex = idx;
+  if (animate) {
+    startSheetRingTransition();
+    updateSheetListUi();
+    updateSheetInfoBadge();
+    return;
+  }
+  syncSheetsOrigins({ preservePartPositions: true });
   rebuildSheetsVisuals();
   updateSheetListUi();
   updateSheetInfoBadge();
+  updateGlobalBounds();
 }
 
 function onResize() {
@@ -1290,7 +1442,7 @@ function setSelectedPart(part) {
   updateSelectedPieceBadge(selectedPart.name || "");
   const partSheetIndex = getValidSheetIndex(selectedPart.userData?.sheetIndex);
   if (partSheetIndex >= 0 && partSheetIndex !== activeSheetIndex) {
-    setActiveSheet(partSheetIndex);
+    setActiveSheet(partSheetIndex, { animate: true });
   } else {
     updateSheetInfoBadge();
   }
@@ -3485,9 +3637,8 @@ function finalizeImportedGroup(localGroup, autoCenter) {
     tempBox.getCenter(tempVec);
     localGroup.position.sub(tempVec);
   }
-  if (Number(localGroup.position.z || 0) < SHEET_PART_ELEVATION) {
-    localGroup.position.z = SHEET_PART_ELEVATION;
-  }
+  const activeSheet = sheetState[getValidSheetIndex(activeSheetIndex)];
+  setPartZForSheet(localGroup, activeSheet || { originZ: 0 });
   localGroup.userData.sheetIndex = activeSheetIndex;
   partsGroup.add(localGroup);
   cachePartBounds(localGroup);
@@ -3944,7 +4095,7 @@ function updateSheetListUi() {
       `<span class="sheet-item-title">Chapa ${idx + 1}</span>` +
       `<span class="sheet-item-meta">${sheet.width.toFixed(0)} x ${sheet.height.toFixed(0)} mm</span>` +
       `<span class="sheet-item-meta">Pecas: ${piecesInSheet(idx)} | Espacamento: ${sheet.spacing.toFixed(1)} mm</span>`;
-    item.addEventListener("click", () => setActiveSheet(idx));
+    item.addEventListener("click", () => setActiveSheet(idx, { animate: true }));
     sheetListEl.appendChild(item);
   }
 }
@@ -3989,8 +4140,7 @@ function readSheetEditorForm() {
 if (newSheetBtn) {
   newSheetBtn.addEventListener("click", () => {
     sheetState.push(createSheetFrom());
-    syncSheetsOrigins({ preservePartPositions: true });
-    setActiveSheet(sheetState.length - 1);
+    setActiveSheet(sheetState.length - 1, { animate: true });
     updateGlobalBounds();
   });
 }
@@ -4460,6 +4610,7 @@ window.addEventListener("beforeunload", () => {
 // ---------------------------
 function animate() {
   requestAnimationFrame(animate);
+  updateSheetRingTransition(performance.now());
   controls.update();
   renderer.render(scene, camera);
 }
