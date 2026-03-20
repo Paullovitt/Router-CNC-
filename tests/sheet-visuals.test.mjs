@@ -28,3 +28,12 @@ test("rebuildSheetsVisuals adiciona arestas da espessura e borda interna util", 
   assert.match(appJs, /const usableBorder = createSheetBorderLine\(/);
   assert.match(appJs, /wrapper\.add\(usableBorder\);/);
 });
+
+test("chapa ativa nao muda preenchimento; destaque fica so nas linhas de borda e margem", () => {
+  const appJs = readAppJs();
+  assert.match(appJs, /color: 0x19232f,/);
+  assert.match(appJs, /emissive: 0x000000,/);
+  assert.match(appJs, /emissiveIntensity: 0/);
+  assert.match(appJs, /const border = createSheetBorderLine\([\s\S]*isActive \? 0x38bdf8 : 0x64748b/);
+  assert.match(appJs, /const usableBorder = createSheetBorderLine\([\s\S]*isActive \? 0x22c55e : 0x4b5563/);
+});

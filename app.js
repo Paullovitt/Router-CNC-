@@ -79,7 +79,6 @@ let pointerMoved = false;
 const SHEET_GAP = 260;
 const SHEET_PART_ELEVATION = 2.4;
 const SHEET_PART_Z_CLAMP = 16;
-const SHEET_ACTIVE_EMISSIVE = 0x0ea5e9;
 const DEFAULT_PART_THICKNESS = 5;
 const DEFAULT_AUTO_CENTER = true;
 const EPS = 1e-6;
@@ -980,13 +979,13 @@ function rebuildSheetsVisuals() {
 
     const bodyGeo = new THREE.BoxGeometry(Number(sheet.width), Number(sheet.height), thickness);
     const bodyMat = new THREE.MeshStandardMaterial({
-      color: isActive ? 0x1e293b : 0x19232f,
+      color: 0x19232f,
       roughness: 0.94,
       metalness: 0.02,
       transparent: true,
       opacity: 0.72,
-      emissive: isActive ? SHEET_ACTIVE_EMISSIVE : 0x000000,
-      emissiveIntensity: isActive ? 0.19 : 0
+      emissive: 0x000000,
+      emissiveIntensity: 0
     });
     const bodyMesh = new THREE.Mesh(bodyGeo, bodyMat);
     bodyMesh.position.set(centerX, centerY, plateZ);
@@ -995,7 +994,7 @@ function rebuildSheetsVisuals() {
 
     const thicknessEdges = createSheetVolumeEdges(
       bodyGeo,
-      isActive ? 0x22d3ee : 0x475569
+      0x475569
     );
     thicknessEdges.position.set(centerX, centerY, plateZ);
     wrapper.add(thicknessEdges);
