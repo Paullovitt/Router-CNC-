@@ -952,6 +952,17 @@ function createSheetBorderLine(minX, minY, maxX, maxY, colorHex) {
   return new THREE.Line(geometry, material);
 }
 
+function createSheetVolumeEdges(boxGeometry, colorHex) {
+  const edgeGeometry = new THREE.EdgesGeometry(boxGeometry);
+  const edgeMaterial = new THREE.LineBasicMaterial({
+    color: colorHex,
+    transparent: true,
+    opacity: 0.92,
+    toneMapped: false
+  });
+  return new THREE.LineSegments(edgeGeometry, edgeMaterial);
+}
+
 function rebuildSheetsVisuals() {
   clearSheetVisuals();
   for (let idx = 0; idx < sheetState.length; idx += 1) {
@@ -981,6 +992,13 @@ function rebuildSheetsVisuals() {
     bodyMesh.position.set(centerX, centerY, plateZ);
     bodyMesh.userData.sheetIndex = idx;
     wrapper.add(bodyMesh);
+
+    const thicknessEdges = createSheetVolumeEdges(
+      bodyGeo,
+      isActive ? 0x22d3ee : 0x475569
+    );
+    thicknessEdges.position.set(centerX, centerY, plateZ);
+    wrapper.add(thicknessEdges);
 
     const border = createSheetBorderLine(
       Number(sheet.originX),
