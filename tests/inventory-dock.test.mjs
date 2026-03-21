@@ -73,14 +73,16 @@ test("montagem reutiliza template em memoria e clona grupo para reduzir custo po
   assert.match(appJs, /const group = item\.templateGroup\?\.clone\(true\) \|\| null;/);
 });
 
-test("estoque renderiza cards em blocos e carrega mais no scroll", () => {
+test("estoque usa virtualizacao real de grid no scroll", () => {
   const appJs = readProjectFile("app.js");
-  assert.match(appJs, /const INVENTORY_RENDER_INITIAL = 120;/);
-  assert.match(appJs, /const INVENTORY_RENDER_CHUNK = 80;/);
-  assert.match(appJs, /function appendMoreInventoryCards\(\)/);
-  assert.match(appJs, /function fillInventoryUntilViewportFilled\(\)/);
+  assert.match(appJs, /const INVENTORY_CARD_HEIGHT = 196;/);
+  assert.match(appJs, /const INVENTORY_VIRTUAL_OVERSCAN_ROWS = 3;/);
+  assert.match(appJs, /function ensureInventoryVirtualStructure\(\)/);
+  assert.match(appJs, /function renderInventoryVirtualWindow\(force = false\)/);
+  assert.match(appJs, /function scheduleInventoryVirtualRender\(force = false\)/);
+  assert.match(appJs, /requestAnimationFrame\(\(\) => \{/);
   assert.match(appJs, /inventoryListEl\.addEventListener\("scroll", \(\) => \{/);
-  assert.match(appJs, /scrollHeight - INVENTORY_SCROLL_PREFETCH_PX/);
+  assert.match(appJs, /scheduleInventoryVirtualRender\(\);/);
 });
 
 test("painel de estoque usa scroll vertical interno", () => {
@@ -88,7 +90,9 @@ test("painel de estoque usa scroll vertical interno", () => {
   assert.match(css, /\.inventory-grid \{[\s\S]*flex: 1 1 auto;/);
   assert.match(css, /\.inventory-grid \{[\s\S]*overflow-y: auto;/);
   assert.match(css, /\.inventory-grid \{[\s\S]*overflow-x: hidden;/);
-  assert.match(css, /\.inventory-grid \{[\s\S]*grid-auto-rows: 196px;/);
+  assert.match(css, /\.inventory-grid \{[\s\S]*position: relative;/);
+  assert.match(css, /\.inventory-grid-content \{[\s\S]*grid-template-columns: repeat\(4, minmax\(0, 1fr\)\);/);
+  assert.match(css, /\.inventory-grid-content \{[\s\S]*grid-auto-rows: 196px;/);
   assert.match(css, /\.inventory-card \{[\s\S]*min-height: 196px;/);
   assert.doesNotMatch(css, /content-visibility:\s*auto/);
   assert.doesNotMatch(css, /contain-intrinsic-size:/);

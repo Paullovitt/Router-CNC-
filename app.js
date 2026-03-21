@@ -127,11 +127,19 @@ let inventoryBusy = false;
 const inventoryPreviewCache = new Map();
 const inventoryPreviewPending = new Set();
 let inventoryPreviewObserver = null;
-const INVENTORY_RENDER_INITIAL = 120;
-const INVENTORY_RENDER_CHUNK = 80;
-const INVENTORY_SCROLL_PREFETCH_PX = 280;
+const INVENTORY_CARD_HEIGHT = 196;
+const INVENTORY_CARD_GAP = 8;
+const INVENTORY_VIRTUAL_OVERSCAN_ROWS = 3;
 let inventoryRenderList = [];
-let inventoryRenderLimit = 0;
+let inventoryVirtualSpacerEl = null;
+let inventoryVirtualContentEl = null;
+let inventoryVirtualColumns = 1;
+let inventoryVirtualLastStart = -1;
+let inventoryVirtualLastEnd = -1;
+let inventoryVirtualLastOffset = -1;
+let inventoryVirtualRafToken = 0;
+let inventoryVirtualResizeObserver = null;
+let inventoryVirtualWindowResizeBound = false;
 let inactiveProxyMesh = null;
 let inactiveProxyDirty = true;
 
@@ -4859,48 +4867,163 @@ function createInventoryCardElement(item) {
   return card;
 }
 
-function appendInventoryCardsRange(startIndex, endIndex) {
+function countGridTracks(template) {
+  const raw = String(template || "").trim();
+  if (!raw || raw === "none") return 1;
+  let depth = 0;
+  let count = 0;
+  let token = "";
+  for (let idx = 0; idx < raw.length; idx += 1) {
+    const char = raw[idx];
+    if (char === "(") depth += 1;
+    if (char === ")") depth = Math.max(0, depth - 1);
+    if (char === " " && depth === 0) {
+      if (token.trim()) count += 1;
+      token = "";
+      continue;
+    }
+    token += char;
+  }
+  if (token.trim()) count += 1;
+  return Math.max(1, count);
+}
+
+function getInventoryVirtualColumnCount() {
+  if (!inventoryVirtualContentEl) return 1;
+  const computed = window.getComputedStyle(inventoryVirtualContentEl);
+  return countGridTracks(computed.gridTemplateColumns);
+}
+
+function ensureInventoryVirtualStructure() {
+  if (!inventoryListEl) return false;
+  if (!inventoryVirtualSpacerEl) {
+    inventoryVirtualSpacerEl = document.createElement("div");
+    inventoryVirtualSpacerEl.className = "inventory-grid-spacer";
+  }
+  if (!inventoryVirtualContentEl) {
+    inventoryVirtualContentEl = document.createElement("div");
+    inventoryVirtualContentEl.className = "inventory-grid-content";
+  }
+  if (
+    inventoryVirtualSpacerEl.parentElement !== inventoryListEl ||
+    inventoryVirtualContentEl.parentElement !== inventoryListEl
+  ) {
+    inventoryListEl.innerHTML = "";
+    inventoryListEl.appendChild(inventoryVirtualSpacerEl);
+    inventoryListEl.appendChild(inventoryVirtualContentEl);
+  }
+  return true;
+}
+
+function resetInventoryVirtualWindow() {
+  inventoryVirtualLastStart = -1;
+  inventoryVirtualLastEnd = -1;
+  inventoryVirtualLastOffset = -1;
+  inventoryVirtualColumns = 1;
+}
+
+function renderInventoryVirtualWindow(force = false) {
   if (!inventoryListEl) return;
-  if (startIndex >= endIndex) return;
+  if (!ensureInventoryVirtualStructure()) return;
+  if (!inventoryVirtualSpacerEl || !inventoryVirtualContentEl) return;
+  const total = inventoryRenderList.length;
+  if (total <= 0) {
+    inventoryVirtualSpacerEl.style.height = "0px";
+    inventoryVirtualContentEl.style.transform = "translateY(0px)";
+    inventoryVirtualContentEl.innerHTML = "";
+    resetInventoryVirtualWindow();
+    return;
+  }
+
+  const columnsMeasured = getInventoryVirtualColumnCount();
+  const columns = Math.max(1, columnsMeasured);
+  if (columns !== inventoryVirtualColumns) {
+    inventoryVirtualColumns = columns;
+    force = true;
+  }
+
+  const rowStride = INVENTORY_CARD_HEIGHT + INVENTORY_CARD_GAP;
+  const totalRows = Math.max(1, Math.ceil(total / columns));
+  const scrollTop = Math.max(0, Number(inventoryListEl.scrollTop || 0));
+  const viewportHeight = Math.max(rowStride, Number(inventoryListEl.clientHeight || rowStride));
+  const startRow = Math.max(0, Math.floor(scrollTop / rowStride) - INVENTORY_VIRTUAL_OVERSCAN_ROWS);
+  const endRow = Math.min(
+    totalRows,
+    Math.ceil((scrollTop + viewportHeight) / rowStride) + INVENTORY_VIRTUAL_OVERSCAN_ROWS
+  );
+  const startIndex = Math.min(total, startRow * columns);
+  const endIndex = Math.min(total, Math.max(startIndex, endRow * columns));
+  const offsetY = startRow * rowStride;
+  const spacerHeight = Math.max(0, totalRows * rowStride - INVENTORY_CARD_GAP);
+  inventoryVirtualSpacerEl.style.height = `${spacerHeight}px`;
+
+  if (
+    !force &&
+    startIndex === inventoryVirtualLastStart &&
+    endIndex === inventoryVirtualLastEnd &&
+    offsetY === inventoryVirtualLastOffset
+  ) {
+    return;
+  }
+
+  inventoryVirtualContentEl.style.transform = `translateY(${offsetY}px)`;
+  inventoryVirtualContentEl.innerHTML = "";
   const fragment = document.createDocumentFragment();
   for (let idx = startIndex; idx < endIndex; idx += 1) {
     const item = inventoryRenderList[idx];
     if (!item) continue;
     fragment.appendChild(createInventoryCardElement(item));
   }
-  inventoryListEl.appendChild(fragment);
+  inventoryVirtualContentEl.appendChild(fragment);
+  inventoryVirtualLastStart = startIndex;
+  inventoryVirtualLastEnd = endIndex;
+  inventoryVirtualLastOffset = offsetY;
   observeInventoryPreviewImages();
 }
 
-function appendMoreInventoryCards() {
-  if (!inventoryListEl) return false;
-  const total = inventoryRenderList.length;
-  if (inventoryRenderLimit >= total) return false;
-  const nextLimit = Math.min(total, inventoryRenderLimit + INVENTORY_RENDER_CHUNK);
-  appendInventoryCardsRange(inventoryRenderLimit, nextLimit);
-  inventoryRenderLimit = nextLimit;
-  return true;
+function scheduleInventoryVirtualRender(force = false) {
+  if (!inventoryListEl) return;
+  if (force) {
+    if (inventoryVirtualRafToken) {
+      cancelAnimationFrame(inventoryVirtualRafToken);
+      inventoryVirtualRafToken = 0;
+    }
+    renderInventoryVirtualWindow(true);
+    return;
+  }
+  if (inventoryVirtualRafToken) return;
+  inventoryVirtualRafToken = requestAnimationFrame(() => {
+    inventoryVirtualRafToken = 0;
+    renderInventoryVirtualWindow(false);
+  });
 }
 
-function fillInventoryUntilViewportFilled() {
+function ensureInventoryVirtualResizeObserver() {
   if (!inventoryListEl) return;
-  while (
-    inventoryRenderLimit < inventoryRenderList.length &&
-    inventoryListEl.scrollHeight <= (inventoryListEl.clientHeight + 16)
-  ) {
-    if (!appendMoreInventoryCards()) break;
+  if (typeof ResizeObserver === "function") {
+    if (inventoryVirtualResizeObserver) return;
+    inventoryVirtualResizeObserver = new ResizeObserver(() => {
+      scheduleInventoryVirtualRender(true);
+    });
+    inventoryVirtualResizeObserver.observe(inventoryListEl);
+    return;
   }
+  if (inventoryVirtualWindowResizeBound) return;
+  inventoryVirtualWindowResizeBound = true;
+  window.addEventListener("resize", () => {
+    scheduleInventoryVirtualRender(true);
+  }, { passive: true });
 }
 
 function updateInventoryListUi() {
   updateInventorySummary();
   if (!inventoryListEl) return;
-  inventoryListEl.innerHTML = "";
-  inventoryListEl.scrollTop = 0;
   inventoryRenderList = filteredInventoryItems();
-  inventoryRenderLimit = 0;
+  inventoryListEl.scrollTop = 0;
+  resetInventoryVirtualWindow();
 
   if (inventoryRenderList.length === 0) {
+    inventoryListEl.innerHTML = "";
     const empty = document.createElement("div");
     empty.className = "inventory-empty";
     empty.textContent = "Importe DXF/STEP para criar o estoque de peças.";
@@ -4908,10 +5031,9 @@ function updateInventoryListUi() {
     return;
   }
 
-  const initialLimit = Math.min(inventoryRenderList.length, INVENTORY_RENDER_INITIAL);
-  appendInventoryCardsRange(0, initialLimit);
-  inventoryRenderLimit = initialLimit;
-  fillInventoryUntilViewportFilled();
+  ensureInventoryVirtualStructure();
+  ensureInventoryVirtualResizeObserver();
+  scheduleInventoryVirtualRender(true);
 }
 
 function removeInventoryItemById(itemId) {
@@ -5709,12 +5831,7 @@ if (inventoryTypeFilterEl) {
 
 if (inventoryListEl) {
   inventoryListEl.addEventListener("scroll", () => {
-    if (inventoryRenderLimit >= inventoryRenderList.length) return;
-    const nearBottom =
-      inventoryListEl.scrollTop + inventoryListEl.clientHeight >=
-      inventoryListEl.scrollHeight - INVENTORY_SCROLL_PREFETCH_PX;
-    if (!nearBottom) return;
-    if (appendMoreInventoryCards()) fillInventoryUntilViewportFilled();
+    scheduleInventoryVirtualRender();
   });
 
   inventoryListEl.addEventListener("keydown", (event) => {

@@ -15,7 +15,7 @@ Permitir importacao e visualizacao 3D de pecas DXF/STEP com um fluxo de producao
 ## Novidades recentes
 
 - painel direito de `Pecas importadas` com busca por codigo e filtro por tipo (`.DXF` / `.STEP`)
-- cards de pecas com miniatura lazy e cache em WebP
+- cards de pecas com miniatura lazy em WebP e DOM virtualizado em grid (renderiza so o trecho visivel)
 - miniaturas com paleta de cores variada por peca (deterministica), evitando repeticao visual
 - campo `Qtd` por item no estoque (Enter confirma, `0` remove o item)
 - botoes de montagem:
@@ -34,7 +34,7 @@ Permitir importacao e visualizacao 3D de pecas DXF/STEP com um fluxo de producao
 - `app.js`: renderizacao Three.js/WebGL, importacao DXF browser-only, importacao STEP, selecao/transform, estado de chapas e estoque
 - `app.js`: ajuste dinamico de `near/far` da camera para reduzir artefatos de profundidade em zoom distante
 - `app.js`: proxies instanciados para chapas inativas (pipeline com shader custom e atributos de instancia)
-- `app.js`: miniaturas das pecas com geracao por canvas, cores por item e cache
+- `app.js`: miniaturas das pecas com geracao por canvas, cores por item, cache em memoria e virtualizacao real do estoque
 - `sheet-layout.js`: funcoes puras de layout (origem de chapas, area util, encaixe sem colisao)
 - `dxf-worker.js`: parse DXF em paralelo no browser
 
@@ -134,7 +134,7 @@ Cobertura atual dos testes:
 - busca de posicao valida para encaixe
 - falha esperada quando a peca nao cabe
 - painel e fluxo de estoque de pecas
-- renderizacao incremental/lazy do estoque
+- virtualizacao real do estoque (grid) para manter DOM pequeno mesmo com muitas pecas
 - badge de FPS
 - atalhos de teclado para remocao
 - pipeline de instancing para proxies inativos

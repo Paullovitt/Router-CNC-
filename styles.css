@@ -241,11 +241,25 @@ select {
   overflow-y: auto;
   overflow-x: hidden;
   padding-right: 4px;
+  position: relative;
+}
+
+.inventory-grid-spacer {
+  width: 100%;
+  pointer-events: none;
+}
+
+.inventory-grid-content {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
   display: grid;
   gap: 8px;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   grid-auto-rows: 196px;
   align-content: start;
+  transform: translateY(0);
 }
 
 .inventory-card {
@@ -448,7 +462,7 @@ select {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .inventory-grid {
+  .inventory-grid-content {
     grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 }
@@ -475,7 +489,7 @@ select {
     grid-template-columns: 1fr;
   }
 
-  .inventory-grid {
+  .inventory-grid-content {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
