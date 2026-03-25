@@ -1,0 +1,22 @@
+﻿# Flutter/Dart
+.dart_tool/
+.packages
+.pub/
+build/
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Flutter generated
+.flutter-plugins
+.flutter-plugins-dependencies
+
+# Visual Studio / CMake outputs
+windows\flutter\ephemeral\
+windows\runner\Debug\
+windows\runner\Release\
